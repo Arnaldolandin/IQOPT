@@ -64,14 +64,26 @@ def rsi(closes, period=14):
     return val
 
 
+def _instrumento(expiry):
+    return "turbo" if expiry <= 5 else "binary"
+
+
 def payout_actual(api, expiry):
-    """Payout (fraccion) de USDJPY-op para el instrumento segun expiracion, o None.
-    turbo si expiry<=5, binary si >5."""
-    instrumento = "turbo" if expiry <= 5 else "binary"
+    """Payout (fraccion) de USDJPY-op para el instrumento segun expiracion, o None."""
     try:
-        return api.get_all_profit().get(ASSET_BUY, {}).get(instrumento)
+        return api.get_all_profit().get(ASSET_BUY, {}).get(_instrumento(expiry))
     except Exception:
         return None
+
+
+def mercado_abierto(api, expiry):
+    """True si USDJPY-op admite compras ahora. Las binarias sobre pares REALES en IQ
+    solo se ofrecen en horario de mercado (limitado); fuera de el, open=False."""
+    try:
+        ot = api.get_all_open_time()
+        return bool(ot.get(_instrumento(expiry), {}).get(ASSET_BUY, {}).get("open"))
+    except Exception:
+        return False
 
 
 def run(api, dry=False, stake=STAKE, expiry=EXPIRY_MIN):
@@ -107,6 +119,11 @@ def run(api, dry=False, stake=STAKE, expiry=EXPIRY_MIN):
                 lado = "put"
             if lado is None:
                 log(f"RSI {r:.1f} (sin señal)")
+                continue
+
+            # USDJPY-op solo abre en horario de mercado (binarias reales = ventana limitada)
+            if not mercado_abierto(api, expiry):
+                log(f"[CERRADO] {lado.upper()} RSI {r:.1f} -> USDJPY-op fuera de horario, sin operar")
                 continue
 
             # Verificar payout vivo

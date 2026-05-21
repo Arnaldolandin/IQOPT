@@ -1,0 +1,35 @@
+# Entornos virtuales
+.venv/
+.venv314/
+env/
+venv/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs de ejecución
+logs/*.log
+bot_run.log
+bot_err.log
+rsi_iq.log
+
+# Archivos temporales / pendientes generados en runtime
+operaciones_temp.txt
+operaciones_pendientes.txt
+
+# Base de datos SQLite (estado de runtime; se regenera con inicializar_db)
+*.db
+*.db-wal
+*.db-shm
+
+# Sistema
+Thumbs.db
+.DS_Store
+
+# Configuración local de Claude Code (permisos por máquina)
+.claude/settings.local.json
+
+# Credenciales (NUNCA subir): email/password de IQ en texto plano
+config.json

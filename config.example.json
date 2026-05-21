@@ -1,0 +1,9 @@
+{
+  "email": "tu_email@ejemplo.com",
+  "password": "TU_PASSWORD_IQ",
+  "telegram": {
+    "habilitado": false,
+    "token": "",
+    "chat_id": ""
+  }
+}

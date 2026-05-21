@@ -187,7 +187,13 @@ def main():
     ap.add_argument("--dry", action="store_true", help="No opera, solo loguea señales")
     ap.add_argument("--stake", type=float, default=STAKE)
     ap.add_argument("--expiry", type=int, default=EXPIRY_MIN, help="Minutos de expiracion (<=5 turbo, >5 binary)")
+    ap.add_argument("--rsi-low", type=float, default=RSI_LOW, help="Umbral CALL (default 35, validado)")
+    ap.add_argument("--rsi-high", type=float, default=RSI_HIGH, help="Umbral PUT (default 65, validado)")
     args = ap.parse_args()
+
+    # Umbrales configurables (aflojar -> mas operaciones pero edge diluido; solo demo)
+    global RSI_LOW, RSI_HIGH
+    RSI_LOW, RSI_HIGH = args.rsi_low, args.rsi_high
 
     with open("config.json", encoding="utf-8") as f:
         cfg = json.load(f)

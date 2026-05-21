@@ -182,6 +182,7 @@ def _parse_result(res, stake, payout):
 
 
 def main():
+    global RSI_LOW, RSI_HIGH
     ap = argparse.ArgumentParser(description="Bot RSI-reversion USDJPY en IQ Option.")
     ap.add_argument("--real", action="store_true", help="Cuenta REAL (default: demo)")
     ap.add_argument("--dry", action="store_true", help="No opera, solo loguea señales")
@@ -192,7 +193,6 @@ def main():
     args = ap.parse_args()
 
     # Umbrales configurables (aflojar -> mas operaciones pero edge diluido; solo demo)
-    global RSI_LOW, RSI_HIGH
     RSI_LOW, RSI_HIGH = args.rsi_low, args.rsi_high
 
     with open("config.json", encoding="utf-8") as f:

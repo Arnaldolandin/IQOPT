@@ -1,7 +1,7 @@
 # rsi_iq_bot.py - Bot enfocado: RSI-reversion sobre USDJPY REAL en IQ Option.
 #
 # Unico edge validado en TODA la investigacion (Deriv frxUSDJPY + backtest IQ confirman):
-#   RSI(14) sobre velas 1-min CERRADAS -> CALL si RSI<35, PUT si RSI>65.
+#   RSI(14) sobre velas 1-min CERRADAS -> CALL si RSI<30, PUT si RSI>70.
 #   Una posicion a la vez. Solo USDJPY (EURUSD/GBPJPY no tienen edge).
 #
 # Backtest en feed de IQ (8000 velas, des-solapado, robusto 5/6 ventanas):
@@ -27,7 +27,7 @@ from iqoptionapi.stable_api import IQ_Option
 ASSET_CANDLES = "USDJPY"      # subyacente real para el RSI
 ASSET_BUY = "USDJPY-op"       # opcion turbo a comprar (id se resuelve con update_ACTIVES_OPCODE)
 RSI_PERIOD = 14
-RSI_LOW, RSI_HIGH = 35, 65
+RSI_LOW, RSI_HIGH = 30, 70   # 30/70 (no 35/65): backtest IQ 62.5% WR @10m (p=0.033) vs 57% con 35/65
 EXPIRY_MIN = 10               # binary (>5m). El backtest da 58.8% a 10m (el mejor margen)
                               # nota: el binary de IQ usa expiraciones a horas fijas, asi que
                               # el tiempo real a expiracion puede variar ~10-15m (el demo lo confirma)
@@ -188,8 +188,8 @@ def main():
     ap.add_argument("--dry", action="store_true", help="No opera, solo loguea señales")
     ap.add_argument("--stake", type=float, default=STAKE)
     ap.add_argument("--expiry", type=int, default=EXPIRY_MIN, help="Minutos de expiracion (<=5 turbo, >5 binary)")
-    ap.add_argument("--rsi-low", type=float, default=RSI_LOW, help="Umbral CALL (default 35, validado)")
-    ap.add_argument("--rsi-high", type=float, default=RSI_HIGH, help="Umbral PUT (default 65, validado)")
+    ap.add_argument("--rsi-low", type=float, default=RSI_LOW, help="Umbral CALL (default 30, validado)")
+    ap.add_argument("--rsi-high", type=float, default=RSI_HIGH, help="Umbral PUT (default 70, validado)")
     args = ap.parse_args()
 
     # Umbrales configurables (aflojar -> mas operaciones pero edge diluido; solo demo)

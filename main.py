@@ -18,10 +18,12 @@
 import argparse
 import json
 import time
+import threading
 from datetime import datetime
 
 import numpy as np
 from iqoptionapi.stable_api import IQ_Option
+from iqoptionapi import constants as OP_code
 
 CFG = {}  # cargado desde config.json en main()
 POLL = 5
@@ -49,7 +51,13 @@ def obtener_activos_binarios(api):
     except Exception:
         return []
     activos = []
+    saltados = []
     for par in configurados:
+        # buy()/get_candles resuelven el active_id via OP_code.ACTIVES[par].
+        # Si el par no esta en las constantes de la libreria, no se puede operar.
+        if par not in OP_code.ACTIVES:
+            saltados.append(par)
+            continue
         key = f"{par}-op"
         info = profits.get(key, {})
         payout = None
@@ -58,6 +66,8 @@ def obtener_activos_binarios(api):
         if payout is None or payout <= 0:
             continue
         activos.append((par, payout))
+    if saltados:
+        log(f"Saltados (no estan en consts de iqoptionapi): {', '.join(saltados)}")
     activos.sort(key=lambda x: -x[1])
     return activos
 
@@ -106,6 +116,7 @@ def run(api, activos, dry=False):
     while True:
         try:
             for par, payout in activos:
+
                 # Payout vivo actualizado
                 try:
                     p = api.get_all_profit().get(f"{par}-op", {}).get(_instrumento(expiry))
@@ -140,6 +151,14 @@ def run(api, activos, dry=False):
                     lado = "call"
                 elif prev_macd >= prev_signal and macd < signal:
                     lado = "put"
+
+                # Log analisis de cada par
+                diff = macd - signal
+                diff_prev = prev_macd - prev_signal
+                cruzo = "CRUCE" if lado else "sin cruce"
+                log(f"  {par:8s} | MACD {macd:+.6f} / Sig {signal:+.6f} | diff {diff:+.6f} | "
+                    f"prev {diff_prev:+.6f} | {cruzo}")
+
                 if lado is None:
                     continue
 
@@ -148,10 +167,10 @@ def run(api, activos, dry=False):
                     continue
 
                 # Comprar. check_win_v4 bloquea hasta cerrar = una posicion a la vez.
-                asset_buy = f"{par}-op"
-                ok, oid = api.buy(stake, asset_buy, lado, expiry)
+                # buy() necesita "-op" suffix para que el servidor lo interprete como opcion binaria.
+                ok, oid = api.buy(stake, f"{par}-op", lado, expiry)
                 if not ok:
-                    log(f"[ERROR] {par} buy {lado.upper()}: {oid}")
+                    log(f"[SKIP] {par} {lado.upper()}: {oid}")
                     continue
                 log(f"[ENTRADA] {par} {lado.upper()} MACD {macd:.5f} / Sig {signal:.5f} | "
                     f"payout {p:.0%} | id={oid} | exp {expiry}m")
@@ -209,8 +228,33 @@ def main():
     if not ok:
         log(f"NO CONECTO: {reason}")
         return
+    log("Conectado. Cambiando balance...")
     api.change_balance("REAL" if args.real else "PRACTICE")
-    api.update_ACTIVES_OPCODE()
+
+    # update_ACTIVES_OPCODE en thread con timeout
+    log("Actualizando opcode de activos...")
+    done = [False]
+    def _update():
+        try:
+            api.get_ALL_Binary_ACTIVES_OPCODE()
+        except Exception:
+            pass
+        done[0] = True
+    t = threading.Thread(target=_update, daemon=True)
+    t.start()
+    t.join(timeout=45)
+
+    # Agregar keys "-op" al dict para que buy() funcione
+    from iqoptionapi.api import OP_code
+    for par in CFG.get("pares_binarios", []):
+        if par in OP_code.ACTIVES and f"{par}-op" not in OP_code.ACTIVES:
+            OP_code.ACTIVES[f"{par}-op"] = OP_code.ACTIVES[par]
+
+    if done[0]:
+        log("Opcode actualizado.")
+    else:
+        log("Opcode timeout, usando lista estatica.")
+
     if args.real:
         log("MODO REAL — dinero real")
 

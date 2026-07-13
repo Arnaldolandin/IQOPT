@@ -29,6 +29,9 @@ RSI(14) sobre velas de 1 minuto **cerradas**: **CALL si RSI < 35, PUT si RSI > 6
   `--expiry` (≤5 turbo, >5 binary).
 - **`backtest_iq.py`** — RSI-reversión des-solapado sobre velas históricas reales; WR vs break-even por horizonte.
 - **`backtest_iq_robustez.py`** — WR de USDJPY por ventanas (estabilidad del edge).
+- **`walkforward.py`** — validación out-of-sample: elige umbral/horizonte in-sample y lo mide fuera de
+  muestra. El 2026-07-13 dio 7.5pt de sobreajuste (IS 65% → OOS 57.5%, p=0.130) y la config del bot
+  (30/70@10m) bajo break-even fuera de muestra. Correr antes de fiarse de cualquier WR de backtest.
 - **`listar_payouts.py`** — lista activos binarios abiertos y payouts (real vs OTC).
 - **`config.json`** — credenciales IQ (`email`/`password`) + `telegram`. ⚠️ Está en git con la password
   en texto plano — pendiente de rotar y sacar a variables de entorno.

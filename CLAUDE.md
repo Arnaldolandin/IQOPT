@@ -36,6 +36,8 @@ RSI(14) sobre velas de 1 minuto **cerradas**: **CALL si RSI < 35, PUT si RSI > 6
   Genera hipótesis, NO conclusiones: el top de 210 combos es multiple-testing. Toda candidata hay que
   validarla con `walkforward.py` sobre histórico largo. El 2026-07-13 su #1 (GBPJPY Bollinger-2.5σ,
   p=0.013 aquí) se cayó a break-even en walk-forward de 40 días → falso positivo.
+- **`backtest_sweep.py`** — barrido previo (7 estrategias × 5 pares × 3 horizontes) con p-valor; precursor
+  de `ranking.py`. El 2026-07-13 no encontró NINGUNA ganadora significativa (útil como control negativo).
 - **`listar_payouts.py`** — lista activos binarios abiertos y payouts (real vs OTC).
 - **`config.json`** — credenciales IQ (`email`/`password`) + `telegram`. ⚠️ Está en git con la password
   en texto plano — pendiente de rotar y sacar a variables de entorno.

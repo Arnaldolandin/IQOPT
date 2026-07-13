@@ -1,0 +1,39 @@
+{
+  "email": "landinw7211@gmail.com",
+  "password": "ParaQue721121",
+
+  "macd": {
+    "fast": 12,
+    "slow": 26,
+    "signal": 9
+  },
+
+  "operacion": {
+    "timeframe_seg": 300,
+    "expiry_min": 10,
+    "stake": 1.0,
+    "min_payout": 0.80
+  },
+
+  "riesgo": {
+    "max_perdida_diaria": 10000,
+    "max_operaciones_hora": 100
+  },
+
+  "pares_binarios": [
+    "EURUSD", "SpaceX", "NZDUSD", "EURGBP", "EURJPY", "BTCUSD", "GBPUSD",
+    "AUDCAD", "XAUUSD", "GBPCHF", "USDJPY", "EURCHF", "AUDJPY", "GBPJPY",
+    "AUDUSD", "APPLE", "CITI", "MSFT", "COKE", "CISCO", "GOOGLE", "AUDCHF",
+    "EURNZD", "ALIBABA", "GBPCAD", "BAIDU", "NZDCAD", "EURAUD", "AMAZON",
+    "USDCAD", "INTEL", "NIKE", "MORSTAN", "GS", "GBPAUD", "ETHUSD",
+    "AUDNZD", "SNAP", "CADCHF", "MCDON", "FACEBOOK", "USOUSD", "TESLA",
+    "EURCAD", "CHFJPY", "JPM", "NZDJPY", "AIG", "GBPNZD", "XRPUSD",
+    "USDBRL"
+  ],
+
+  "telegram": {
+    "habilitado": true,
+    "token": "7697680837:AAHZTDVvU6G8WDf19t_QPl4t18eoVVNTx80",
+    "chat_id": "6636667737"
+  }
+}

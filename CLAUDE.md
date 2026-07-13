@@ -32,6 +32,10 @@ RSI(14) sobre velas de 1 minuto **cerradas**: **CALL si RSI < 35, PUT si RSI > 6
 - **`walkforward.py`** — validación out-of-sample: elige umbral/horizonte in-sample y lo mide fuera de
   muestra. El 2026-07-13 dio 7.5pt de sobreajuste (IS 65% → OOS 57.5%, p=0.130) y la config del bot
   (30/70@10m) bajo break-even fuera de muestra. Correr antes de fiarse de cualquier WR de backtest.
+- **`ranking.py`** — barrido de ~14 estrategias × 5 pares × 3 horizontes con split 70/30 train/test.
+  Genera hipótesis, NO conclusiones: el top de 210 combos es multiple-testing. Toda candidata hay que
+  validarla con `walkforward.py` sobre histórico largo. El 2026-07-13 su #1 (GBPJPY Bollinger-2.5σ,
+  p=0.013 aquí) se cayó a break-even en walk-forward de 40 días → falso positivo.
 - **`listar_payouts.py`** — lista activos binarios abiertos y payouts (real vs OTC).
 - **`config.json`** — credenciales IQ (`email`/`password`) + `telegram`. ⚠️ Está en git con la password
   en texto plano — pendiente de rotar y sacar a variables de entorno.

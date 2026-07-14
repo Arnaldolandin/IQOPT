@@ -303,16 +303,23 @@ class TelegramCommanderSimple:
             print("[TELEGRAM] No hay token/chat_id en config.json")
             return
 
+        base = f"https://api.telegram.org/bot{token}"
+        # Limpiar webhook y conflictos previos
+        try:
+            requests.post(f"{base}/deleteWebhook", data={"drop_pending_updates": True}, timeout=10)
+        except Exception:
+            pass
+
         print(f"[TELEGRAM] Bot activo. Chat ID: {chat_id}")
         ultimo_update = 0
-        backoff = 1
-        MAX_BACKOFF = 60
+        consecutive_409 = 0
 
         while True:
+            resp = None
             try:
-                url = f"https://api.telegram.org/bot{token}/getUpdates"
-                params = {"offset": ultimo_update + 1, "timeout": 30}
-                resp = requests.get(url, params=params, timeout=35)
+                url = f"{base}/getUpdates"
+                params = {"offset": ultimo_update + 1, "timeout": 20}
+                resp = requests.get(url, params=params, timeout=25)
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("ok") and data.get("result"):
@@ -323,27 +330,36 @@ class TelegramCommanderSimple:
                                 respuesta = self.procesar_comando(texto)
                                 if respuesta:
                                     self._enviar(chat_id, respuesta, token)
-                    backoff = 1
+                    consecutive_409 = 0
                 elif resp.status_code == 409:
-                    # Conflict - otro polling activo, esperar más
-                    print(f"[TELEGRAM] Conflict (409), esperando {backoff * 2}s...")
-                    time.sleep(backoff * 2)
-                    backoff = min(backoff * 2, MAX_BACKOFF)
+                    consecutive_409 += 1
+                    if consecutive_409 <= 2:
+                        print(f"[TELEGRAM] Conflict (409), reintentando...")
+                        time.sleep(2)
+                    else:
+                        # Limpiar webhook y forzar limpieza
+                        try:
+                            requests.post(f"{base}/deleteWebhook",
+                                          data={"drop_pending_updates": True}, timeout=10)
+                        except Exception:
+                            pass
+                        print(f"[TELEGRAM] 409 persistente, limpiando webhook...")
+                        time.sleep(5)
+                        consecutive_409 = 0
                 else:
                     print(f"[TELEGRAM] HTTP {resp.status_code}")
                     time.sleep(5)
             except requests.exceptions.Timeout:
-                # Timeout normal en long polling, no es error
-                backoff = 1
+                pass
             except requests.exceptions.ConnectionError as e:
-                err = str(e)[:80]
-                print(f"[TELEGRAM] Conexion perdida: {err}")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, MAX_BACKOFF)
+                print(f"[TELEGRAM] Conexion perdida: {str(e)[:60]}")
+                time.sleep(5)
             except Exception as e:
-                print(f"[TELEGRAM] Error: {type(e).__name__}: {str(e)[:80]}")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, MAX_BACKOFF)
+                print(f"[TELEGRAM] Error: {type(e).__name__}: {str(e)[:60]}")
+                time.sleep(3)
+            finally:
+                if resp is not None:
+                    resp.close()
 
     def _enviar(self, chat_id, texto, token):
         try:

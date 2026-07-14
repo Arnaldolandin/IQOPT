@@ -229,6 +229,7 @@ def run(api, activos, dry=False):
 
     ultimas_velas = {}
     _ultima_limpieza = time.time()
+    _ultimo_reload = time.time()
 
     while True:
         try:
@@ -236,6 +237,18 @@ def run(api, activos, dry=False):
                 log("[PAUSADO] Bot pausado via Telegram. Esperando...")
                 time.sleep(10)
                 continue
+
+            if time.time() - _ultimo_reload > 30:
+                try:
+                    with open("config.json", encoding="utf-8") as f:
+                        nuevo = json.load(f)
+                    # Actualizar solo params operacionales (no email/password)
+                    for k in ("macd", "operacion", "max_trades", "filtro_hora", "riesgo"):
+                        if k in nuevo:
+                            CFG[k] = nuevo[k]
+                    _ultimo_reload = time.time()
+                except Exception:
+                    pass
 
             if time.time() - _ultima_limpieza > 3600:
                 ahora = time.time()
@@ -276,7 +289,9 @@ def run(api, activos, dry=False):
                         continue
 
                 try:
-                    velas = api.get_candles(par, CFG["operacion"]["timeframe_seg"], 60, time.time())
+                    n_velas = max(CFG["macd"]["slow"] + CFG["macd"]["signal"] + 2,
+                                  CFG.get("operacion", {}).get("ema_trend", 0) + 5, 120)
+                    velas = api.get_candles(par, CFG["operacion"]["timeframe_seg"], n_velas, time.time())
                 except Exception:
                     continue
                 if not velas or len(velas) < CFG["macd"]["slow"] + CFG["macd"]["signal"] + 2:

@@ -1,16 +1,16 @@
 # CLAUDE.md
 
-Guía para Claude Code al trabajar en este repositorio.
+Guia para Claude Code al trabajar en este repositorio.
 
-## Qué es esto
+## Que es esto
 
-Bot de **opciones binarias en IQ Option** que opera **51 activos binarios reales** (no OTC) con
-estrategia **MACD crossover** en velas de 5 minutos. Todo el código y los logs están en español.
+Bot de **opciones binarias en IQ Option** que opera **231 activos** (50 real + 181 OTC) con
+estrategia **MACD crossover** en velas de 5 minutos. Todo el codigo y los logs estan en espanol.
 
-> **Historia (importante):** este proyecto tenía antes un bot de ~2000 líneas que operaba pares **OTC**
-> con 8 estrategias de momentum/reversión. Se eliminó porque se demostró que **pierde por diseño**:
-> los OTC de IQ son un feed RNG de la casa, ~49.5% WR sobre 2568 ops reales (−$20.837), sin edge.
-> No reintroducir esa vía. También hubo una fase RSI-reversión sobre USDJPY que no alcanzó
+> **Historia (importante):** este proyecto tenia antes un bot de ~2000 lineas que operaba pares **OTC**
+> con 8 estrategias de momentum/reversion. Se elimino porque se demostro que **pierde por diseno**:
+> los OTC de IQ son un feed RNG de la casa, ~49.5% WR sobre 2568 ops reales, sin edge.
+> No reintroducir esa via. Tambien hubo una fase RSI-reversion sobre USDJPY que no alcanzo
 > significancia (OOS ~53.5%, bajo break-even con payout 87%). Abandonada.
 
 ## La estrategia actual
@@ -19,49 +19,61 @@ estrategia **MACD crossover** en velas de 5 minutos. Todo el código y los logs 
 - **CALL** cuando MACD cruza signal de abajo-arriba.
 - **PUT** cuando MACD cruza signal de arriba-abajo.
 - MACD(12,26,9) por defecto (configurable en `config.json`).
-- Binary 10 minutos de expiración.
+- Binary 10 minutos de expiracion.
 - Payout actual: 87-88%. Break-even ~53.5% WR.
-- **51 activos reales** (forex, commodities, crypto, acciones). Sin OTC.
+- **231 activos** (50 real + 181 OTC). Sin OTC en historial.
+- **Filtro EMA(100)**: solo opera A FAVOR de la tendencia.
+- **Multi-hilo**: cada trade en su propio thread, hasta 10 simultaneos.
+- **Hot-reload**: stake/expiry/payout/max_trades/MACD se actualizan sin reiniciar.
+- **Telegram**: control remoto via comandos.
 
-Backtest (16k velas, train/test 70/30): top OOS GBPCAD 5m MACD(8,17,9) exp15m → 67.2% WR p=0.022.
-⚠️ **No demostrado rentable en vivo todavía.** Mantener en DEMO hasta acumular muestra propia.
+Backtest (50 real, 16k velas, train/test 70/30): top OOS GBPCAD 5m MACD(8,17,9) exp15m -> 67.2% WR p=0.022.
+Backtest sweep MACD x EMA: **ninguna config supera break-even** (53.5%). Mejor: 6,13,5 base WR 47.9%.
+Backtest riguroso 57 activos: **todos EV negativo**, mejor NZDJPY WR 52.5%.
+⚠️ **No demostrado rentable en vivo todavia.** Mantener en DEMO hasta acumular muestra propia.
 
 ## Archivos
 
-- **`main.py`** — el bot. MACD-crossover multi-activo, una posición a la vez (bloquea en
-  `check_win_v4`), verifica payout vivo (salta si < min_payout). Lee todo de `config.json`.
-  Flags: `--dry` (solo señales), sin flag = demo, `--real` (CUIDADO).
-- **`config.json`** — credenciales IQ, parámetros MACD (fast/slow/signal), operación (timeframe,
-  expiry, stake, min_payout), 51 pares binarios, Telegram. ⚠️ Password en texto plano en git.
-- **`backtest_macd.py`** — backtester MACD-crossover sobre todos los activos binarios reales.
-  Train/test 70/30, p-valor, walk-forward integrado.
-- **`backtest_iq.py`** — backtester RSI-reversión (legacy, para referencia).
-- **`walkforward.py`** — validación out-of-sample RSI (legacy).
-- **`ranking.py`** — ranking multi-estrategia (legacy).
-- **`listar_payouts.py`** — lista activos binarios y payouts.
+- **`main.py`** — el bot. MACD-crossover multi-activo MULTI-HILO, hasta 10 posiciones simultaneas
+  (bloquea en `check_win_v4`), verifica payout vivo, filtro EMA, reconexion automatica,
+  hot-reload de config. Lee todo de `config.json`. Flags: `--dry` (solo senales),
+  sin flag = demo, `--real` (CUIDADO).
+- **`config.json`** — credenciales IQ, parametros MACD (fast/slow/signal), operacion (timeframe,
+  expiry, stake, min_payout, ema_trend), max_trades, filtro_hora, 231 pares binarios, Telegram.
+  ⚠️ Password en texto plano en git.
+- **`telegram_commands.py`** — comandos Telegram: /status, /balance, /modo, /activas, /pares,
+  /estrategia, /pnl, /config, /ayuda, /setmacd, /setstake, /setmaxtrades, /setexpiry,
+  /setpayout, /filtrar on|off, /pausar, /reanudar, /reiniciar.
+- **`backtest_riguroso.py`** — backtester MACD-crossover sobre 57 activos con par×hora×dia.
+- **`backtest_macd_ema_sweep.py`** — sweep 5 configs MACD x 3 EMAs (50/100/200).
+- **`backtest_ema_trend.py`** — test filtro EMA trend.
+- **`analisis_par_hora.py`** — analisis par×hora con velas 5m.
+- **`listar_otc.py`** — descubre 182 OTC pares con payout.
 - **`rsi_iq.log`** — log del bot.
 
-## Cómo correr
+## Como correr
 
 ```powershell
-.venv314\Scripts\python.exe main.py            # DEMO (51 activos, binary 10m)
-.venv314\Scripts\python.exe main.py --dry      # solo loguea señales
+.venv314\Scripts\python.exe main.py            # DEMO (231 activos, binary 5m, EMA 100)
+.venv314\Scripts\python.exe main.py --dry      # solo loguea senales
 ```
 
 Usar **`.venv314`** (Python 3.14, con `iqoptionapi`).
 
-## Mecánica de la API de IQ (clave, fácil de olvidar)
+## Mecanica de la API de IQ (clave, facil de olvidar)
 
-- **Velas** → activo subyacente `"USDJPY"` (get_candles).
-- **Comprar** → activo `"USDJPY-op"` (requiere `api.update_ACTIVES_OPCODE()` tras conectar,
+- **Velas** -> activo subyacente `"USDJPY"` (get_candles).
+- **Comprar** -> activo `"USDJPY-op"` (requiere `api.update_ACTIVES_OPCODE()` tras conectar,
   pero **HANGUEA** — se usa workaround con `get_all_profit()` + lista hardcodeada).
 - Tras `connect()`: `api.change_balance("PRACTICE")` (demo) o `"REAL"`.
-- `api.buy(monto, "USDJPY-op", "call"|"put", minutos)` → `(status, order_id)`.
+- `api.buy(monto, "USDJPY-op", "call"|"put", minutos)` -> `(status, order_id)`.
 - `api.check_win_v4(order_id)` **bloquea** hasta el cierre del contrato.
-- El binary de IQ usa expiraciones a horas fijas → el tiempo real a expiración varía (~10-15m).
+- El binary de IQ usa expiraciones a horas fijas -> el tiempo real a expiracion varia (~10-15m).
 - `get_all_profit()` devuelve payouts sin necesidad de `update_ACTIVES_OPCODE()`.
+- OTC pairs: `get_all_profit()` keys son `"AIG-OTC"` (sin `-op`), reales son `"EURUSD-op"`.
 
 ## Convenciones
 
-- Logging con `print()` + emojis y archivo (`rsi_iq.log`). Una posición a la vez (el bot bloquea en
-  `check_win_v4`). Scanea todos los activos del config en cada ciclo.
+- Logging con `print()` + emojis y archivo (`rsi_iq.log`). Multi-hilo con `_lock` protege
+  contadores compartidos. Telegram en daemon thread. Scanea todos los activos del config en
+  cada ciclo. Filtro hora en UTC (OTC exentos).

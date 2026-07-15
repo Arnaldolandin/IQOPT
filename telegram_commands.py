@@ -74,6 +74,10 @@ class TelegramCommanderSimple:
             elif val in ("off", "no", "false", "0"):
                 return self._toggle_filtro(False)
             return "[ERROR] Uso: /filtrar on|off"
+        elif cmd in ("/slope", "/pendiente"):
+            return self._ver_slope()
+        elif len(partes) >= 2 and cmd == "/setslope":
+            return self._set_slope(partes[1])
         elif len(partes) >= 2 and cmd == "/setpoll":
             return self._set_global("poll_seg", partes[1],
                                     lambda v: v.isdigit() and int(v) >= 1)
@@ -105,7 +109,7 @@ class TelegramCommanderSimple:
             f"Balance: ${balance}",
             f"Estrategia: MACD({self.cfg['macd']['fast']},{self.cfg['macd']['slow']},{self.cfg['macd']['signal']})",
             f"Binary {self.cfg['operacion']['expiry_min']}m | Stake ${self.cfg['operacion']['stake']}",
-            f"Max trades: {self.cfg.get('max_trades', 1)}",
+            f"Max trades: {self.cfg.get('max_trades', 1)} | Min slope: {self.cfg.get('operacion', {}).get('min_macd_slope', 0)}",
             f"Filtro hora: {'ON' if filtro_on else 'OFF'} ({len(horas_cfg)} pares)",
             f"Hora UTC: {hora_utc} | Chile: {hora_chile}",
             f"\nSesion: {tr} ops | WR {wr:.1f}% | PnL {pnl_s}${pnl:.2f}",
@@ -150,6 +154,7 @@ class TelegramCommanderSimple:
             f"PUT: MACD cruza signal de arriba-abajo\n"
             f"Expiracion: binary {op['expiry_min']}m\n"
             f"Stake: ${op['stake']} | Min payout: {op['min_payout']:.0%}\n"
+            f"Min slope: {op.get('min_macd_slope', 0)}\n"
             f"Filtro hora: {'ON' if filtro.get('habilitado') else 'OFF'} ({len(horas)} pares con horarios)\n"
             f"Multi-hilo: max {self.cfg.get('max_trades', 1)} trades simultaneos"
         )
@@ -171,6 +176,8 @@ class TelegramCommanderSimple:
             "/setmaxtrades [n] - Max trades simultaneos\n"
             "/setexpiry [min] - Expiracion binary\n"
             "/setpayout [0.80] - Min payout\n"
+            "/slope - Ver min_macd_slope actual\n"
+            "/setslope [valor] - Pendiente minima MACD\n"
             "/filtrar on|off - Filtro de hora\n"
             "/setpoll [seg] - Intervalo de escaneo\n\n"
             "Control:\n"
@@ -208,6 +215,7 @@ class TelegramCommanderSimple:
             f"Expiracion: {op['expiry_min']}m\n"
             f"Stake: ${op['stake']}\n"
             f"Min payout: {op['min_payout']:.0%}\n"
+            f"Min slope: {op.get('min_macd_slope', 0)}\n"
             f"Max trades: {self.cfg.get('max_trades', 1)}\n"
             f"Filtro hora: {'ON' if filtro.get('habilitado') else 'OFF'}\n"
             f"Timezone offset: {filtro.get('timezone_offset', 0)}h\n"
@@ -270,6 +278,26 @@ class TelegramCommanderSimple:
         self.cfg[clave] = int(valor_str)
         self._guardar_cfg()
         return f"[OK] {clave} = {int(valor_str)}"
+
+    def _ver_slope(self):
+        slope = self.cfg.get("operacion", {}).get("min_macd_slope", 0)
+        return (
+            f"[SLOPE] min_macd_slope = {slope}\n"
+            f"Pendiente minima del MACD histogram (normalizada por precio).\n"
+            f"0 = sin filtro | tipico forex ~0.00005 | valores > 0.001 casi no operan\n"
+            f"Usa /setslope [valor] para cambiar."
+        )
+
+    def _set_slope(self, valor_str):
+        try:
+            val = float(valor_str)
+        except ValueError:
+            return "[ERROR] Valor invalido. Ejemplo: /setslope 0.00005"
+        if val < 0:
+            return "[ERROR] Valor debe ser >= 0"
+        self.cfg.setdefault("operacion", {})["min_macd_slope"] = val
+        self._guardar_cfg()
+        return f"[OK] operacion.min_macd_slope = {val}\nSe aplicara en el proximo ciclo (hot-reload)."
 
     def _toggle_filtro(self, on):
         self.cfg.setdefault("filtro_hora", {})["habilitado"] = on

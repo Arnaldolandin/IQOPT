@@ -1,10 +1,10 @@
-# main.py - Bot MACD-crossover multi-activo MULTI-HILO en IQ Option.
+# main.py - Bot REVERSION-Bollinger multi-activo MULTI-HILO en IQ Option.
 #
-# Estrategia: MACD(12,26,9) en velas 5-min CERRADAS.
-#   CALL cuando MACD cruza signal de abajo-arriba.
-#   PUT  cuando MACD cruza signal de arriba-abajo.
-#   Multi-hilo: analiza todos los activos y abre trades en paralelo.
-#   Max trades abiertos configurable en config.json -> "max_trades".
+# Estrategia: reversion con Bandas de Bollinger sobre velas cerradas.
+#   CALL cuando el precio cruza por DEBAJO de la banda inferior (rebote).
+#   PUT  cuando el precio cruza por ENCIMA de la banda superior.
+#   Filtro ATR opcional (volatilidad minima). Multi-hilo, hasta max_trades a la vez.
+#   Todo configurable en config.json -> "operacion" (bb_period, bb_k, min_atr...).
 #
 #   .venv314\Scripts\python.exe main.py            # DEMO
 #   .venv314\Scripts\python.exe main.py --dry      # solo loguea senales
@@ -177,30 +177,39 @@ def obtener_activos_binarios(api):
     return activos
 
 
-def ema(c, span):
-    c = np.asarray(c, float)
-    a = 2.0 / (span + 1)
-    out = np.copy(c)
-    for i in range(1, len(c)):
-        out[i] = a * c[i] + (1 - a) * out[i - 1]
-    return out
-
-
-def macd_last(closes, fast=None, slow=None, sig_p=None):
-    if fast is None:
-        fast = CFG["macd"]["fast"]
-    if slow is None:
-        slow = CFG["macd"]["slow"]
-    if sig_p is None:
-        sig_p = CFG["macd"]["signal"]
-    c = np.asarray(closes, dtype=float)
-    if len(c) < slow + sig_p + 2:
+def atr_pct(highs, lows, closes, period):
+    """ATR (Wilder) de las ultimas `period` velas, normalizado por precio (fraccion).
+    Devuelve None si no hay suficientes velas."""
+    n = len(closes)
+    if n < period + 1:
         return None
-    ema_f = ema(c, fast)
-    ema_s = ema(c, slow)
-    macd_line = ema_f - ema_s
-    sig_line = ema(macd_line, sig_p)
-    return (macd_line[-1], sig_line[-1], macd_line[-2], sig_line[-2])
+    trs = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i],
+                 abs(highs[i] - closes[i - 1]),
+                 abs(lows[i] - closes[i - 1]))
+        trs.append(tr)
+    atr = sum(trs[-period:]) / period
+    precio = abs(closes[-1]) or 1.0
+    return atr / precio
+
+
+def bb_last(closes, period, k):
+    """Bandas de Bollinger: devuelve (close, close_prev, low, low_prev, up, up_prev) o None."""
+    c = np.asarray(closes, dtype=float)
+    n = len(c)
+    if n < period + 1:
+        return None
+
+    def banda(idx):
+        w = c[idx - period + 1:idx + 1]
+        m = w.mean()
+        s = w.std()
+        return m - k * s, m + k * s
+
+    lo1, up1 = banda(n - 1)
+    lo0, up0 = banda(n - 2)
+    return c[-1], c[-2], lo1, lo0, up1, up0
 
 
 def _parse_result(res, stake, payout):
@@ -223,7 +232,7 @@ def _parse_result(res, stake, payout):
     return False, -stake
 
 
-def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id, ema_txt=""):
+def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
     # El contador (sumar_trade) ya fue incrementado por el hilo principal
     # ANTES de lanzar este thread, para que hay_capacidad() no se pase de max_trades.
     try:
@@ -234,8 +243,8 @@ def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id,
             with _lock:
                 _cruces_fallidos.add(f"{par}-{vela_id}")
             return
-        log(f"[ENTRADA] {par} {lado.upper()} MACD {macd:.5f} / Sig {signal:.5f} | "
-            f"payout {payout:.0%} | id={oid} | exp {expiry}m | {ema_txt}")
+        log(f"[ENTRADA] {par} {lado.upper()} | payout {payout:.0%} | id={oid} | "
+            f"exp {expiry}m | {info_txt}")
 
         res = api.check_win_v4(oid)
         gano, profit = _parse_result(res, stake, payout)
@@ -261,8 +270,10 @@ def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id,
 
 
 def run(api, activos, dry=False):
-    log(f"=== MACD Bot | {len(activos)} activos | MACD({CFG['macd']['fast']},{CFG['macd']['slow']},{CFG['macd']['signal']}) | "
-        f"{_instrumento(CFG['operacion']['expiry_min'])} {CFG['operacion']['expiry_min']}m | stake ${CFG['operacion']['stake']} | max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
+    op = CFG["operacion"]
+    log(f"=== Bot REVERSION-Bollinger | {len(activos)} activos | BB({op.get('bb_period',20)},{op.get('bb_k',2.0)}) | "
+        f"ATR min {op.get('min_atr',0)} | {_instrumento(op['expiry_min'])} {op['expiry_min']}m | stake ${op['stake']} | "
+        f"max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
 
     filtro = CFG.get("filtro_hora", {})
     if filtro.get("habilitado"):
@@ -293,7 +304,7 @@ def run(api, activos, dry=False):
                 try:
                     with open("config.json", encoding="utf-8") as f:
                         nuevo = json.load(f)
-                    for k in ("macd", "operacion", "max_trades", "filtro_hora", "riesgo"):
+                    for k in ("operacion", "max_trades", "filtro_hora", "riesgo"):
                         if k in nuevo:
                             CFG[k] = nuevo[k]
                     _ultimo_reload = time.time()
@@ -342,17 +353,13 @@ def run(api, activos, dry=False):
                         continue
 
                 try:
-                    # Bajar ~5x el periodo de la EMA mas lenta para que CONVERJA.
-                    # Con solo ~periodo velas, la EMA arrastra el seed inicial y la
-                    # decision de alineacion sale mal (~4% de los cruces).
-                    ema_max = max(CFG.get("operacion", {}).get("ema_trend", 0),
-                                  CFG.get("operacion", {}).get("ema_trend_fast", 0))
-                    n_velas = min(1000, max(CFG["macd"]["slow"] + CFG["macd"]["signal"] + 2,
-                                            ema_max * 5, 200))
+                    bb_p = CFG["operacion"].get("bb_period", 20)
+                    atr_pp = CFG["operacion"].get("atr_period", 14)
+                    n_velas = min(1000, max(bb_p + 5, atr_pp + 5, 200))
                     velas = api.get_candles(par, CFG["operacion"]["timeframe_seg"], n_velas, time.time())
                 except Exception:
                     continue
-                if not velas or len(velas) < CFG["macd"]["slow"] + CFG["macd"]["signal"] + 2:
+                if not velas or len(velas) < max(bb_p, atr_pp) + 2:
                     continue
 
                 vela_cerrada = int(velas[-2]["from"])
@@ -361,62 +368,40 @@ def run(api, activos, dry=False):
                 ultimas_velas[par] = vela_cerrada
 
                 closes = [float(v["close"]) for v in velas[:-1]]
-                r = macd_last(closes)
-                if r is None:
+                highs = [float(v.get("max", v.get("high", v["close"]))) for v in velas[:-1]]
+                lows = [float(v.get("min", v.get("low", v["close"]))) for v in velas[:-1]]
+                # ── Estrategia: REVERSION Bollinger ───────────────────────────
+                #   CALL: precio cruza por DEBAJO de la banda inferior (rebote).
+                #   PUT:  precio cruza por ENCIMA de la banda superior.
+                bp = CFG["operacion"].get("bb_period", 20)
+                bk = CFG["operacion"].get("bb_k", 2.0)
+                bb = bb_last(closes, bp, bk)
+                if bb is None:
                     continue
-
-                macd_val, signal_val, prev_macd, prev_signal = r
+                cn, cp, lo1, lo0, up1, up0 = bb
                 lado = None
-                if prev_macd <= prev_signal and macd_val > signal_val:
+                if cp >= lo0 and cn < lo1:
                     lado = "call"
-                elif prev_macd >= prev_signal and macd_val < signal_val:
+                elif cp <= up0 and cn > up1:
                     lado = "put"
-
-                diff = macd_val - signal_val
-                diff_prev = prev_macd - prev_signal
-                cruzo = "CRUCE" if lado else "sin cruce"
-                log(f"  {par:8s} | MACD {macd_val:+.6f} / Sig {signal_val:+.6f} | "
-                    f"diff {diff:+.6f} | prev {diff_prev:+.6f} | {cruzo}")
+                info_txt = f"px {cn:.5f} BB[{lo1:.5f},{up1:.5f}]"
+                log(f"  {par:8s} | {info_txt} | {'SENAL ' + lado.upper() if lado else 'sin senal'}")
 
                 if lado is None:
                     continue
 
-                # Filtro tendencia: alineacion precio/EMA(s).
-                # Con ema_trend_fast activo -> exige APILADO:
-                #   CALL: precio > EMA_fast > EMA_slow   PUT: precio < EMA_fast < EMA_slow
-                # Sin ema_trend_fast (=0) -> comportamiento anterior con una sola EMA.
-                ema_txt = ""
-                ema_slow_p = CFG.get("operacion", {}).get("ema_trend", 0)
-                ema_fast_p = CFG.get("operacion", {}).get("ema_trend_fast", 0)
-                if ema_slow_p and len(closes) >= max(ema_slow_p, ema_fast_p):
-                    closes_np = np.asarray(closes, dtype=float)
-                    ema_slow = float(ema(closes_np, ema_slow_p)[-1])
-                    precio = closes[-1]
-                    if ema_fast_p:
-                        ema_fast = float(ema(closes_np, ema_fast_p)[-1])
-                        alineado = ((lado == "call" and precio > ema_fast > ema_slow) or
-                                    (lado == "put" and precio < ema_fast < ema_slow))
-                        if not alineado:
-                            log(f"  [FILTRO-EMA{ema_fast_p}/{ema_slow_p}] {par} {lado.upper()} descartado "
-                                f"(no alineado: precio {precio:.5f} EMA{ema_fast_p} {ema_fast:.5f} EMA{ema_slow_p} {ema_slow:.5f})")
+                # Filtro ATR (volatilidad): solo operar si ATR/precio >= min_atr.
+                # Evita entrar en rangos muertos donde el precio no se mueve.
+                min_atr = CFG.get("operacion", {}).get("min_atr", 0.0)
+                atr_p = CFG.get("operacion", {}).get("atr_period", 14)
+                if min_atr and len(closes) > atr_p:
+                    a = atr_pct(highs, lows, closes, atr_p)
+                    if a is not None:
+                        if a < min_atr:
+                            log(f"  [FILTRO-ATR] {par} {lado.upper()} descartado "
+                                f"(ATR {a:.4%} < min {min_atr:.4%})")
                             continue
-                        ema_txt = f"px {precio:.5f} EMA{ema_fast_p} {ema_fast:.5f} EMA{ema_slow_p} {ema_slow:.5f}"
-                    elif (lado == "call" and precio <= ema_slow) or (lado == "put" and precio >= ema_slow):
-                        log(f"  [FILTRO-EMA{ema_slow_p}] {par} {lado.upper()} descartado "
-                            f"(contra tendencia: precio {precio:.5f} vs EMA {ema_slow:.5f})")
-                        continue
-                    else:
-                        ema_txt = f"px {precio:.5f} EMA{ema_slow_p} {ema_slow:.5f}"
-
-                # Filtro pendiente histograma MACD (normalizada por precio)
-                min_slope = CFG.get("operacion", {}).get("min_macd_slope", 0.0)
-                if min_slope and len(closes) >= 2:
-                    precio_ref = abs(closes[-1]) or 1.0
-                    slope = (diff - diff_prev) / precio_ref
-                    if (lado == "call" and slope < min_slope) or (lado == "put" and slope > -min_slope):
-                        log(f"  [FILTRO-SLOPE] {par} {lado.upper()} descartado "
-                            f"(pendiente norm {slope:+.6%}, min {min_slope:.4%})")
-                        continue
+                        info_txt = info_txt + f" | ATR {a:.4%}"
 
                 clave = f"{par}-{vela_cerrada}"
                 with _lock:
@@ -424,7 +409,7 @@ def run(api, activos, dry=False):
                         continue
 
                 if dry:
-                    log(f"[DRY] {par} {lado.upper()} MACD {macd_val:.5f} / Sig {signal_val:.5f} | payout {p:.0%}")
+                    log(f"[DRY] {par} {lado.upper()} | {info_txt} | payout {p:.0%}")
                     continue
 
                 if ops_hora_excedidas():
@@ -440,7 +425,7 @@ def run(api, activos, dry=False):
 
                 t = threading.Thread(
                     target=ejecutar_trade,
-                    args=(api, par, lado, macd_val, signal_val, p, stake, expiry, vela_cerrada, ema_txt),
+                    args=(api, par, lado, p, stake, expiry, vela_cerrada, info_txt),
                     daemon=True,
                 )
                 t.start()
@@ -454,7 +439,7 @@ def run(api, activos, dry=False):
 
 def main():
     global CFG, _balance_mode
-    ap = argparse.ArgumentParser(description="Bot MACD-crossover multi-activo MULTI-HILO.")
+    ap = argparse.ArgumentParser(description="Bot REVERSION-Bollinger multi-activo MULTI-HILO.")
     ap.add_argument("--real", action="store_true", help="Cuenta REAL (default: demo)")
     ap.add_argument("--dry", action="store_true", help="No opera, solo loguea senales")
     args = ap.parse_args()

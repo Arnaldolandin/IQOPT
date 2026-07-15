@@ -33,3 +33,5 @@ Thumbs.db
 
 # Credenciales (NUNCA subir): email/password de IQ en texto plano
 config.json
+.env
+secrets.local.json

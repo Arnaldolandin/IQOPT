@@ -11,6 +11,7 @@
 #   .venv314\Scripts\python.exe main.py --real     # CUIDADO
 import argparse
 import json
+import os
 import time
 import threading
 from datetime import datetime, timezone
@@ -29,6 +30,9 @@ _activos_ref = {"abiertos": 0}
 _cruces_fallidos = set()
 _ultima_ping = time.time()
 _conectado = True
+
+# Control de riesgo: PnL del dia (UTC) y timestamps de aperturas (ventana 1h).
+_riesgo = {"fecha": None, "pnl_dia": 0.0, "ops": []}
 
 
 def log(msg):
@@ -58,6 +62,47 @@ def restar_trade():
     global _trades_abiertos
     with _lock:
         _trades_abiertos -= 1
+
+
+def _reset_dia_si_cambia():
+    # Debe llamarse con _lock tomado.
+    hoy = datetime.now(timezone.utc).date().isoformat()
+    if _riesgo["fecha"] != hoy:
+        _riesgo["fecha"] = hoy
+        _riesgo["pnl_dia"] = 0.0
+        _riesgo["ops"] = []
+
+
+def perdida_diaria_excedida():
+    max_perd = CFG.get("riesgo", {}).get("max_perdida_diaria")
+    if not max_perd:
+        return False
+    with _lock:
+        _reset_dia_si_cambia()
+        return -_riesgo["pnl_dia"] >= max_perd
+
+
+def ops_hora_excedidas():
+    max_ops = CFG.get("riesgo", {}).get("max_operaciones_hora")
+    if not max_ops:
+        return False
+    ahora = time.time()
+    with _lock:
+        _reset_dia_si_cambia()
+        _riesgo["ops"] = [t for t in _riesgo["ops"] if ahora - t < 3600]
+        return len(_riesgo["ops"]) >= max_ops
+
+
+def registrar_apertura():
+    with _lock:
+        _reset_dia_si_cambia()
+        _riesgo["ops"].append(time.time())
+
+
+def registrar_resultado(profit):
+    with _lock:
+        _reset_dia_si_cambia()
+        _riesgo["pnl_dia"] += profit
 
 
 def _profit_key(par):
@@ -179,9 +224,8 @@ def _parse_result(res, stake, payout):
 
 
 def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id):
-    sumar_trade()
-    with _lock:
-        _activos_ref["abiertos"] = _trades_abiertos
+    # El contador (sumar_trade) ya fue incrementado por el hilo principal
+    # ANTES de lanzar este thread, para que hay_capacidad() no se pase de max_trades.
     try:
         ok, oid = api.buy(stake, f"{par}-op", lado, expiry)
         if not ok:
@@ -196,6 +240,7 @@ def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id)
         res = api.check_win_v4(oid)
         gano, profit = _parse_result(res, stake, payout)
 
+        registrar_resultado(profit)
         with _lock:
             _sesion["trades"] += 1
             _sesion["pnl"] += profit
@@ -238,6 +283,12 @@ def run(api, activos, dry=False):
                 time.sleep(10)
                 continue
 
+            if not dry and perdida_diaria_excedida():
+                max_perd = CFG.get("riesgo", {}).get("max_perdida_diaria")
+                log(f"[RIESGO] Perdida diaria >= ${max_perd}. Sin nuevas aperturas hoy (UTC). Durmiendo 60s...")
+                time.sleep(60)
+                continue
+
             if time.time() - _ultimo_reload > 30:
                 try:
                     with open("config.json", encoding="utf-8") as f:
@@ -262,6 +313,12 @@ def run(api, activos, dry=False):
                 time.sleep(30)
                 continue
 
+            # Una sola consulta de payouts por ciclo (evita 231 llamadas/ciclo).
+            try:
+                profits_ciclo = api.get_all_profit()
+            except Exception:
+                profits_ciclo = {}
+
             for par, payout in activos:
                 stake = CFG["operacion"]["stake"]
                 expiry = CFG["operacion"]["expiry_min"]
@@ -272,10 +329,7 @@ def run(api, activos, dry=False):
                     time.sleep(10)
                     break
 
-                try:
-                    p = api.get_all_profit().get(_profit_key(par), {}).get(_instrumento(expiry))
-                except Exception:
-                    p = None
+                p = profits_ciclo.get(_profit_key(par), {}).get(_instrumento(expiry))
                 payout_ok = p is not None and p >= CFG["operacion"]["min_payout"]
                 if not payout_ok:
                     continue
@@ -351,6 +405,17 @@ def run(api, activos, dry=False):
                     log(f"[DRY] {par} {lado.upper()} MACD {macd_val:.5f} / Sig {signal_val:.5f} | payout {p:.0%}")
                     continue
 
+                if ops_hora_excedidas():
+                    max_ops = CFG.get("riesgo", {}).get("max_operaciones_hora")
+                    log(f"[RIESGO] {max_ops} ops/hora alcanzadas. Esperando...")
+                    break
+
+                # Reservar cupo ANTES de lanzar el hilo para no pasarse de max_trades.
+                sumar_trade()
+                registrar_apertura()
+                with _lock:
+                    _activos_ref["abiertos"] = _trades_abiertos
+
                 t = threading.Thread(
                     target=ejecutar_trade,
                     args=(api, par, lado, macd_val, signal_val, p, stake, expiry, vela_cerrada),
@@ -376,6 +441,18 @@ def main():
 
     with open("config.json", encoding="utf-8") as f:
         CFG = json.load(f)
+
+    # Credenciales: variables de entorno tienen prioridad sobre config.json.
+    # Permite NO guardar secretos en el repo (config.json esta gitignored/untracked).
+    CFG["email"] = os.getenv("IQ_EMAIL") or CFG.get("email")
+    CFG["password"] = os.getenv("IQ_PASSWORD") or CFG.get("password")
+    tg = CFG.setdefault("telegram", {})
+    tg["token"] = os.getenv("TELEGRAM_TOKEN") or tg.get("token")
+    tg["chat_id"] = os.getenv("TELEGRAM_CHAT_ID") or tg.get("chat_id")
+    if not CFG.get("email") or not CFG.get("password"):
+        log("FALTAN CREDENCIALES: define IQ_EMAIL/IQ_PASSWORD o config.json")
+        return
+
     api = IQ_Option(CFG["email"], CFG["password"])
     log("Conectando a IQ Option...")
     ok, reason = api.connect()

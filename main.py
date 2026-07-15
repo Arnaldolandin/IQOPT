@@ -223,7 +223,7 @@ def _parse_result(res, stake, payout):
     return False, -stake
 
 
-def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id):
+def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id, ema_txt=""):
     # El contador (sumar_trade) ya fue incrementado por el hilo principal
     # ANTES de lanzar este thread, para que hay_capacidad() no se pase de max_trades.
     try:
@@ -235,7 +235,7 @@ def ejecutar_trade(api, par, lado, macd, signal, payout, stake, expiry, vela_id)
                 _cruces_fallidos.add(f"{par}-{vela_id}")
             return
         log(f"[ENTRADA] {par} {lado.upper()} MACD {macd:.5f} / Sig {signal:.5f} | "
-            f"payout {payout:.0%} | id={oid} | exp {expiry}m")
+            f"payout {payout:.0%} | id={oid} | exp {expiry}m | {ema_txt}")
 
         res = api.check_win_v4(oid)
         gano, profit = _parse_result(res, stake, payout)
@@ -342,8 +342,13 @@ def run(api, activos, dry=False):
                         continue
 
                 try:
-                    n_velas = max(CFG["macd"]["slow"] + CFG["macd"]["signal"] + 2,
-                                  CFG.get("operacion", {}).get("ema_trend", 0) + 5, 120)
+                    # Bajar ~5x el periodo de la EMA mas lenta para que CONVERJA.
+                    # Con solo ~periodo velas, la EMA arrastra el seed inicial y la
+                    # decision de alineacion sale mal (~4% de los cruces).
+                    ema_max = max(CFG.get("operacion", {}).get("ema_trend", 0),
+                                  CFG.get("operacion", {}).get("ema_trend_fast", 0))
+                    n_velas = min(1000, max(CFG["macd"]["slow"] + CFG["macd"]["signal"] + 2,
+                                            ema_max * 5, 200))
                     velas = api.get_candles(par, CFG["operacion"]["timeframe_seg"], n_velas, time.time())
                 except Exception:
                     continue
@@ -376,15 +381,32 @@ def run(api, activos, dry=False):
                 if lado is None:
                     continue
 
-                # Filtro tendencia: solo operar A FAVOR de la EMA
-                ema_p = CFG.get("operacion", {}).get("ema_trend", 0)
-                if ema_p and len(closes) >= ema_p:
-                    ema_t = float(ema(np.asarray(closes, dtype=float), ema_p)[-1])
+                # Filtro tendencia: alineacion precio/EMA(s).
+                # Con ema_trend_fast activo -> exige APILADO:
+                #   CALL: precio > EMA_fast > EMA_slow   PUT: precio < EMA_fast < EMA_slow
+                # Sin ema_trend_fast (=0) -> comportamiento anterior con una sola EMA.
+                ema_txt = ""
+                ema_slow_p = CFG.get("operacion", {}).get("ema_trend", 0)
+                ema_fast_p = CFG.get("operacion", {}).get("ema_trend_fast", 0)
+                if ema_slow_p and len(closes) >= max(ema_slow_p, ema_fast_p):
+                    closes_np = np.asarray(closes, dtype=float)
+                    ema_slow = float(ema(closes_np, ema_slow_p)[-1])
                     precio = closes[-1]
-                    if (lado == "call" and precio <= ema_t) or (lado == "put" and precio >= ema_t):
-                        log(f"  [FILTRO-EMA{ema_p}] {par} {lado.upper()} descartado "
-                            f"(contra tendencia: precio {precio:.5f} vs EMA {ema_t:.5f})")
+                    if ema_fast_p:
+                        ema_fast = float(ema(closes_np, ema_fast_p)[-1])
+                        alineado = ((lado == "call" and precio > ema_fast > ema_slow) or
+                                    (lado == "put" and precio < ema_fast < ema_slow))
+                        if not alineado:
+                            log(f"  [FILTRO-EMA{ema_fast_p}/{ema_slow_p}] {par} {lado.upper()} descartado "
+                                f"(no alineado: precio {precio:.5f} EMA{ema_fast_p} {ema_fast:.5f} EMA{ema_slow_p} {ema_slow:.5f})")
+                            continue
+                        ema_txt = f"px {precio:.5f} EMA{ema_fast_p} {ema_fast:.5f} EMA{ema_slow_p} {ema_slow:.5f}"
+                    elif (lado == "call" and precio <= ema_slow) or (lado == "put" and precio >= ema_slow):
+                        log(f"  [FILTRO-EMA{ema_slow_p}] {par} {lado.upper()} descartado "
+                            f"(contra tendencia: precio {precio:.5f} vs EMA {ema_slow:.5f})")
                         continue
+                    else:
+                        ema_txt = f"px {precio:.5f} EMA{ema_slow_p} {ema_slow:.5f}"
 
                 # Filtro pendiente histograma MACD (normalizada por precio)
                 min_slope = CFG.get("operacion", {}).get("min_macd_slope", 0.0)
@@ -418,7 +440,7 @@ def run(api, activos, dry=False):
 
                 t = threading.Thread(
                     target=ejecutar_trade,
-                    args=(api, par, lado, macd_val, signal_val, p, stake, expiry, vela_cerrada),
+                    args=(api, par, lado, macd_val, signal_val, p, stake, expiry, vela_cerrada, ema_txt),
                     daemon=True,
                 )
                 t.start()

@@ -78,6 +78,10 @@ class TelegramCommanderSimple:
             return self._ver_slope()
         elif len(partes) >= 2 and cmd == "/setslope":
             return self._set_slope(partes[1])
+        elif cmd in ("/ema", "/emas"):
+            return self._ver_ema()
+        elif len(partes) >= 2 and cmd == "/setema":
+            return self._set_ema(partes[1], partes[2] if len(partes) >= 3 else None)
         elif len(partes) >= 2 and cmd == "/setpoll":
             return self._set_global("poll_seg", partes[1],
                                     lambda v: v.isdigit() and int(v) >= 1)
@@ -110,6 +114,7 @@ class TelegramCommanderSimple:
             f"Estrategia: MACD({self.cfg['macd']['fast']},{self.cfg['macd']['slow']},{self.cfg['macd']['signal']})",
             f"Binary {self.cfg['operacion']['expiry_min']}m | Stake ${self.cfg['operacion']['stake']}",
             f"Max trades: {self.cfg.get('max_trades', 1)} | Min slope: {self.cfg.get('operacion', {}).get('min_macd_slope', 0)}",
+            f"EMA: fast {self.cfg.get('operacion', {}).get('ema_trend_fast', 0)} / slow {self.cfg.get('operacion', {}).get('ema_trend', 0)}",
             f"Filtro hora: {'ON' if filtro_on else 'OFF'} ({len(horas_cfg)} pares)",
             f"Hora UTC: {hora_utc} | Chile: {hora_chile}",
             f"\nSesion: {tr} ops | WR {wr:.1f}% | PnL {pnl_s}${pnl:.2f}",
@@ -155,9 +160,20 @@ class TelegramCommanderSimple:
             f"Expiracion: binary {op['expiry_min']}m\n"
             f"Stake: ${op['stake']} | Min payout: {op['min_payout']:.0%}\n"
             f"Min slope: {op.get('min_macd_slope', 0)}\n"
+            f"Filtro EMA: {self._desc_ema()}\n"
             f"Filtro hora: {'ON' if filtro.get('habilitado') else 'OFF'} ({len(horas)} pares con horarios)\n"
             f"Multi-hilo: max {self.cfg.get('max_trades', 1)} trades simultaneos"
         )
+
+    def _desc_ema(self):
+        op = self.cfg.get("operacion", {})
+        fast = op.get("ema_trend_fast", 0)
+        slow = op.get("ema_trend", 0)
+        if fast:
+            return f"apilada precio>EMA{fast}>EMA{slow} (a favor de tendencia)"
+        if slow:
+            return f"EMA{slow} unica (a favor de tendencia)"
+        return "OFF"
 
     def _ayuda(self):
         return (
@@ -178,6 +194,8 @@ class TelegramCommanderSimple:
             "/setpayout [0.80] - Min payout\n"
             "/slope - Ver min_macd_slope actual\n"
             "/setslope [valor] - Pendiente minima MACD\n"
+            "/ema - Ver EMAs de tendencia\n"
+            "/setema [fast] [slow] - EMA apilada (fast=0 desactiva)\n"
             "/filtrar on|off - Filtro de hora\n"
             "/setpoll [seg] - Intervalo de escaneo\n\n"
             "Control:\n"
@@ -216,6 +234,7 @@ class TelegramCommanderSimple:
             f"Stake: ${op['stake']}\n"
             f"Min payout: {op['min_payout']:.0%}\n"
             f"Min slope: {op.get('min_macd_slope', 0)}\n"
+            f"EMA fast/slow: {op.get('ema_trend_fast', 0)}/{op.get('ema_trend', 0)}\n"
             f"Max trades: {self.cfg.get('max_trades', 1)}\n"
             f"Filtro hora: {'ON' if filtro.get('habilitado') else 'OFF'}\n"
             f"Timezone offset: {filtro.get('timezone_offset', 0)}h\n"
@@ -298,6 +317,36 @@ class TelegramCommanderSimple:
         self.cfg.setdefault("operacion", {})["min_macd_slope"] = val
         self._guardar_cfg()
         return f"[OK] operacion.min_macd_slope = {val}\nSe aplicara en el proximo ciclo (hot-reload)."
+
+    def _ver_ema(self):
+        op = self.cfg.get("operacion", {})
+        fast = op.get("ema_trend_fast", 0)
+        slow = op.get("ema_trend", 0)
+        if fast:
+            modo = (f"DOBLE EMA apilada: CALL si precio>EMA{fast}>EMA{slow}, "
+                    f"PUT si precio<EMA{fast}<EMA{slow}")
+        elif slow:
+            modo = f"EMA unica: CALL si precio>EMA{slow}, PUT si precio<EMA{slow}"
+        else:
+            modo = "SIN filtro EMA"
+        return (f"[EMA] fast={fast} slow={slow}\n{modo}\n"
+                f"Usa /setema [fast] [slow] (fast=0 desactiva la doble EMA).")
+
+    def _set_ema(self, fast_str, slow_str):
+        if not fast_str.isdigit() or (slow_str is not None and not slow_str.isdigit()):
+            return "[ERROR] /setema [fast] [slow]  (ej: /setema 50 100)"
+        fast = int(fast_str)
+        slow = int(slow_str) if slow_str is not None else self.cfg.get("operacion", {}).get("ema_trend", 0)
+        if slow < 5 or slow > 500:
+            return "[ERROR] slow debe estar entre 5 y 500"
+        if fast and (fast < 2 or fast >= slow):
+            return "[ERROR] fast debe ser >=2 y menor que slow (o 0 para desactivar la 2a EMA)"
+        op = self.cfg.setdefault("operacion", {})
+        op["ema_trend_fast"] = fast
+        op["ema_trend"] = slow
+        self._guardar_cfg()
+        modo = f"apilada EMA{fast}>EMA{slow}" if fast else f"unica EMA{slow}"
+        return f"[OK] ema_trend_fast={fast} ema_trend={slow} ({modo})\nSe aplicara en el proximo ciclo (hot-reload)."
 
     def _toggle_filtro(self, on):
         self.cfg.setdefault("filtro_hora", {})["habilitado"] = on

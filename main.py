@@ -333,6 +333,16 @@ def run(api, activos, dry=False):
                             f"(contra tendencia: precio {precio:.5f} vs EMA {ema_t:.5f})")
                         continue
 
+                # Filtro pendiente histograma MACD (normalizada por precio)
+                min_slope = CFG.get("operacion", {}).get("min_macd_slope", 0.0)
+                if min_slope and len(closes) >= 2:
+                    precio_ref = abs(closes[-1]) or 1.0
+                    slope = (diff - diff_prev) / precio_ref
+                    if (lado == "call" and slope < min_slope) or (lado == "put" and slope > -min_slope):
+                        log(f"  [FILTRO-SLOPE] {par} {lado.upper()} descartado "
+                            f"(pendiente norm {slope:+.6%}, min {min_slope:.4%})")
+                        continue
+
                 clave = f"{par}-{vela_cerrada}"
                 with _lock:
                     if clave in _cruces_fallidos:

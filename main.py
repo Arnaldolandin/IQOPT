@@ -242,13 +242,12 @@ def run(api, activos, dry=False):
                 try:
                     with open("config.json", encoding="utf-8") as f:
                         nuevo = json.load(f)
-                    # Actualizar solo params operacionales (no email/password)
                     for k in ("macd", "operacion", "max_trades", "filtro_hora", "riesgo"):
                         if k in nuevo:
                             CFG[k] = nuevo[k]
                     _ultimo_reload = time.time()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"[RELOAD] Error: {e}")
 
             if time.time() - _ultima_limpieza > 3600:
                 ahora = time.time()

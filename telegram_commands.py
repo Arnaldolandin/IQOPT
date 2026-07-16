@@ -72,18 +72,8 @@ class TelegramCommanderSimple:
             elif val in ("off", "no", "false", "0"):
                 return self._toggle_filtro(False)
             return "[ERROR] Uso: /filtrar on|off"
-        elif cmd in ("/bb", "/bollinger"):
-            return self._ver_bb()
-        elif len(partes) >= 2 and cmd == "/setbb":
-            return self._set_bb(partes[1], partes[2] if len(partes) >= 3 else None)
-        elif len(partes) >= 2 and cmd == "/setestrategia":
-            return self._set_estrategia(partes[1])
-        elif cmd == "/macd":
-            return self._ver_macd()
-        elif len(partes) >= 3 and cmd == "/setmacd":
-            return self._set_macd(partes[1], partes[2], partes[3] if len(partes) >= 4 else None)
-        elif len(partes) >= 2 and cmd == "/setmacdema":
-            return self._set_macdema(partes[1])
+        elif len(partes) >= 2 and cmd == "/setscore":
+            return self._set_score(partes[1])
         elif cmd in ("/atr", "/volatilidad"):
             return self._ver_atr()
         elif len(partes) >= 2 and cmd == "/setatr":
@@ -115,14 +105,11 @@ class TelegramCommanderSimple:
         hora_chile = (hora_utc + offset) % 24
 
         op = self.cfg.get("operacion", {})
-        est = op.get("estrategia", "bb_rev")
-        est_txt = (f"MACD-cruce({op.get('macd_fast',6)},{op.get('macd_slow',13)},{op.get('macd_signal',5)})"
-                   if est == "macd" else f"BB-reversion({op.get('bb_period',20)},{op.get('bb_k',2.0)})")
         lines = [
             "[STATUS] Bot IQ Option\n",
             f"Modo: {'REAL' if self._es_real() else 'DEMO'}",
             f"Balance: ${balance}",
-            f"Estrategia: {est_txt}",
+            f"Estrategia: Predictor confluencia (min_score {op.get('min_score', 3)})",
             f"Exp {op['expiry_min']}m | Stake ${op['stake']}",
             f"Max trades: {self.cfg.get('max_trades', 1)} | ATR min: {op.get('min_atr', 0)}",
             f"Filtro hora: {'ON' if filtro_on else 'OFF'} ({len(horas_cfg)} pares)",
@@ -162,18 +149,11 @@ class TelegramCommanderSimple:
         filtro = self.cfg.get("filtro_hora", {})
         horas = filtro.get("horas_por_par", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        est = op.get("estrategia", "bb_rev")
-        if est == "macd":
-            ema_p = op.get("macd_ema", 0)
-            filt = f" + filtro EMA{ema_p}" if ema_p else " (sin EMA)"
-            senal = (f"CRUCE MACD ({op.get('macd_fast',6)},{op.get('macd_slow',13)},{op.get('macd_signal',5)}){filt}\n"
-                     f"CALL: MACD cruza sobre signal | PUT: cruza bajo signal"
-                     + (f"\nEMA{ema_p}: CALL solo si precio>EMA, PUT si precio<EMA" if ema_p else ""))
-        else:
-            senal = (f"REVERSION Bollinger ({op.get('bb_period',20)}, {op.get('bb_k',2.0)})\n"
-                     f"CALL: precio cruza bajo banda inferior | PUT: sobre banda superior")
+        senal = (f"PREDICTOR de confluencia (6 votos)\n"
+                 f"Vota: MACD, momentum histograma, EMA50, ultimas 3 velas, RSI, Bollinger.\n"
+                 f"Opera CALL/PUT solo si |score| >= {op.get('min_score', 3)} (max 6).")
         return (
-            f"[ESTRATEGIA] {est}\n{senal}\n"
+            f"[ESTRATEGIA] {senal}\n"
             f"Velas {tf}m | Expiracion {op['expiry_min']}m | Stake ${op['stake']}\n"
             f"Filtro ATR: min {op.get('min_atr',0)} (period {op.get('atr_period',14)})\n"
             f"Filtro hora: {'ON' if filtro.get('habilitado') else 'OFF'} ({len(horas)} pares)\n"
@@ -196,12 +176,7 @@ class TelegramCommanderSimple:
             "/setmaxtrades [n] - Max trades simultaneos\n"
             "/setexpiry [min] - Expiracion\n"
             "/setpayout [0.80] - Min payout\n"
-            "/setestrategia bb_rev|macd - Cambiar estrategia\n"
-            "/bb - Ver Bollinger (periodo, k)\n"
-            "/setbb [periodo] [k] - Ajustar Bollinger\n"
-            "/macd - Ver cruce MACD (fast/slow/signal + EMA)\n"
-            "/setmacd [fast] [slow] [signal] - Ajustar MACD\n"
-            "/setmacdema [periodo] - Filtro EMA del MACD (0 desactiva)\n"
+            "/setscore [n] - Umbral de confluencia para operar (1-6)\n"
             "/atr - Ver filtro de volatilidad ATR\n"
             "/setatr [min] [period] - ATR minimo (0 desactiva)\n"
             "/filtrar on|off - Filtro de hora\n"
@@ -252,12 +227,10 @@ class TelegramCommanderSimple:
         op = self.cfg["operacion"]
         filtro = self.cfg.get("filtro_hora", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        est = op.get("estrategia", "bb_rev")
         return (
             f"[CONFIG]\n"
-            f"Estrategia: {est}\n"
-            f"BB periodo/k: {op.get('bb_period', 20)}/{op.get('bb_k', 2.0)}\n"
-            f"MACD: {op.get('macd_fast',6)}/{op.get('macd_slow',13)}/{op.get('macd_signal',5)} | EMA filtro: {op.get('macd_ema',0)}\n"
+            f"Estrategia: Predictor confluencia\n"
+            f"min_score: {op.get('min_score', 3)} (1-6)\n"
             f"Timeframe: {tf}m\n"
             f"Expiracion: {op['expiry_min']}m\n"
             f"Stake: ${op['stake']}\n"
@@ -311,75 +284,13 @@ class TelegramCommanderSimple:
         self._guardar_cfg()
         return f"[OK] {clave} = {int(valor_str)}"
 
-    def _set_estrategia(self, val):
-        val = val.lower()
-        validas = ("bb_rev", "macd")
-        if val not in validas:
-            return f"[ERROR] Estrategia invalida. Opciones: {', '.join(validas)}"
-        self.cfg.setdefault("operacion", {})["estrategia"] = val
+    def _set_score(self, val_str):
+        if not val_str.isdigit() or not (1 <= int(val_str) <= 6):
+            return "[ERROR] /setscore [n]  con n entre 1 y 6 (umbral de confluencia)"
+        self.cfg.setdefault("operacion", {})["min_score"] = int(val_str)
         self._guardar_cfg()
-        desc = {"bb_rev": "Reversion Bollinger (CALL bajo banda / PUT sobre banda)",
-                "macd": "Cruce MACD puro (CALL cruza arriba / PUT cruza abajo, sin EMAs ni pendiente)"}[val]
-        return f"[OK] estrategia = {val}\n{desc}\nSe aplicara en el proximo ciclo (hot-reload)."
-
-    def _ver_macd(self):
-        op = self.cfg.get("operacion", {})
-        ema_p = op.get("macd_ema", 0)
-        filtro = f"filtro EMA{ema_p} (solo a favor de tendencia)" if ema_p else "sin filtro EMA"
-        return (f"[MACD] fast={op.get('macd_fast',6)} slow={op.get('macd_slow',13)} signal={op.get('macd_signal',5)} | {filtro}\n"
-                f"CALL cuando MACD cruza sobre signal, PUT al reves.\n"
-                f"Con EMA{ema_p}: CALL solo si precio>EMA, PUT solo si precio<EMA.\n"
-                f"Ajustar: /setmacd [fast] [slow] [signal] | /setmacdema [periodo] (0 desactiva).")
-
-    def _set_macdema(self, per_str):
-        if not per_str.isdigit() or int(per_str) > 500:
-            return "[ERROR] /setmacdema [periodo]  (0 desactiva, max 500)"
-        self.cfg.setdefault("operacion", {})["macd_ema"] = int(per_str)
-        self._guardar_cfg()
-        p = int(per_str)
-        estado = "sin filtro EMA" if p == 0 else f"filtro EMA{p} (solo a favor de tendencia)"
-        return f"[OK] macd_ema = {p} ({estado})\nSe aplicara en el proximo ciclo (hot-reload)."
-
-    def _set_macd(self, fast_str, slow_str, signal_str):
-        if not (fast_str.isdigit() and slow_str.isdigit()):
-            return "[ERROR] /setmacd [fast] [slow] [signal]"
-        fast, slow = int(fast_str), int(slow_str)
-        sig = int(signal_str) if signal_str and signal_str.isdigit() else self.cfg["operacion"].get("macd_signal", 5)
-        if not (2 <= fast <= 100 and 3 <= slow <= 400):
-            return "[ERROR] fast 2-100, slow 3-400"
-        if fast >= slow:
-            return "[ERROR] fast debe ser menor que slow"
-        op = self.cfg.setdefault("operacion", {})
-        op["macd_fast"] = fast
-        op["macd_slow"] = slow
-        op["macd_signal"] = sig
-        self._guardar_cfg()
-        return f"[OK] MACD {fast}/{slow}/{sig}\nSe aplicara en el proximo ciclo (hot-reload)."
-
-    def _ver_bb(self):
-        op = self.cfg.get("operacion", {})
-        per = op.get("bb_period", 20)
-        k = op.get("bb_k", 2.0)
-        return (f"[BB] periodo={per}  k={k}\n"
-                f"Reversion Bollinger: CALL si precio cruza bajo la banda inferior, "
-                f"PUT si cruza sobre la superior.\n"
-                f"Usa /setbb [periodo] [k]  (ej: /setbb 20 2.0).")
-
-    def _set_bb(self, per_str, k_str):
-        if not per_str.isdigit() or not (5 <= int(per_str) <= 200):
-            return "[ERROR] periodo debe ser entero 5-200"
-        op = self.cfg.setdefault("operacion", {})
-        op["bb_period"] = int(per_str)
-        if k_str is not None:
-            try:
-                k = float(k_str)
-            except ValueError:
-                return "[ERROR] k invalido. Ej: /setbb 20 2.0"
-            if not (0.5 <= k <= 5):
-                return "[ERROR] k debe estar entre 0.5 y 5"
-            op["bb_k"] = k
-        self._guardar_cfg()
-        return f"[OK] BB periodo={op['bb_period']} k={op.get('bb_k',2.0)}\nSe aplicara en el proximo ciclo (hot-reload)."
+        return (f"[OK] min_score = {int(val_str)}\nEl bot opera solo si |score| >= {int(val_str)} "
+                f"(mas alto = menos ops, mas selectivo).\nSe aplicara en el proximo ciclo (hot-reload).")
 
     def _ver_atr(self):
         op = self.cfg.get("operacion", {})

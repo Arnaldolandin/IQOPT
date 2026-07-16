@@ -72,8 +72,8 @@ class TelegramCommanderSimple:
             elif val in ("off", "no", "false", "0"):
                 return self._toggle_filtro(False)
             return "[ERROR] Uso: /filtrar on|off"
-        elif len(partes) >= 2 and cmd == "/setscore":
-            return self._set_score(partes[1])
+        elif len(partes) >= 2 and cmd == "/setconf":
+            return self._set_conf(partes[1])
         elif cmd in ("/atr", "/volatilidad"):
             return self._ver_atr()
         elif len(partes) >= 2 and cmd == "/setatr":
@@ -109,7 +109,7 @@ class TelegramCommanderSimple:
             "[STATUS] Bot IQ Option\n",
             f"Modo: {'REAL' if self._es_real() else 'DEMO'}",
             f"Balance: ${balance}",
-            f"Estrategia: Predictor confluencia (min_score {op.get('min_score', 3)})",
+            f"Estrategia: Predictor optimizado (min_conf {op.get('min_conf', 0.02)})",
             f"Exp {op['expiry_min']}m | Stake ${op['stake']}",
             f"Max trades: {self.cfg.get('max_trades', 1)} | ATR min: {op.get('min_atr', 0)}",
             f"Filtro hora: {'ON' if filtro_on else 'OFF'} ({len(horas_cfg)} pares)",
@@ -149,9 +149,9 @@ class TelegramCommanderSimple:
         filtro = self.cfg.get("filtro_hora", {})
         horas = filtro.get("horas_por_par", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        senal = (f"PREDICTOR de confluencia (6 votos)\n"
-                 f"Vota: MACD, momentum histograma, EMA50, ultimas 3 velas, RSI, Bollinger.\n"
-                 f"Opera CALL/PUT solo si |score| >= {op.get('min_score', 3)} (max 6).")
+        senal = (f"PREDICTOR optimizado (13 indicadores, pesos aprendidos por logistica)\n"
+                 f"MACD, EMA50/200, RSI, Stochastic, Williams%R, CCI, ADX/DI, ROC, Bollinger, ult3.\n"
+                 f"Opera CALL/PUT solo si la confianza |p-0.5| >= {op.get('min_conf', 0.02)}.")
         return (
             f"[ESTRATEGIA] {senal}\n"
             f"Velas {tf}m | Expiracion {op['expiry_min']}m | Stake ${op['stake']}\n"
@@ -176,7 +176,7 @@ class TelegramCommanderSimple:
             "/setmaxtrades [n] - Max trades simultaneos\n"
             "/setexpiry [min] - Expiracion\n"
             "/setpayout [0.80] - Min payout\n"
-            "/setscore [n] - Umbral de confluencia para operar (1-6)\n"
+            "/setconf [x] - Umbral de confianza para operar (ej 0.02-0.10)\n"
             "/atr - Ver filtro de volatilidad ATR\n"
             "/setatr [min] [period] - ATR minimo (0 desactiva)\n"
             "/filtrar on|off - Filtro de hora\n"
@@ -230,7 +230,7 @@ class TelegramCommanderSimple:
         return (
             f"[CONFIG]\n"
             f"Estrategia: Predictor confluencia\n"
-            f"min_score: {op.get('min_score', 3)} (1-6)\n"
+            f"min_conf: {op.get('min_conf', 0.02)}\n"
             f"Timeframe: {tf}m\n"
             f"Expiracion: {op['expiry_min']}m\n"
             f"Stake: ${op['stake']}\n"
@@ -284,12 +284,16 @@ class TelegramCommanderSimple:
         self._guardar_cfg()
         return f"[OK] {clave} = {int(valor_str)}"
 
-    def _set_score(self, val_str):
-        if not val_str.isdigit() or not (1 <= int(val_str) <= 6):
-            return "[ERROR] /setscore [n]  con n entre 1 y 6 (umbral de confluencia)"
-        self.cfg.setdefault("operacion", {})["min_score"] = int(val_str)
+    def _set_conf(self, val_str):
+        try:
+            v = float(val_str)
+        except ValueError:
+            return "[ERROR] /setconf [x]  con x tipo 0.02 (umbral de confianza |p-0.5|)"
+        if not (0.0 <= v <= 0.49):
+            return "[ERROR] confianza entre 0 y 0.49"
+        self.cfg.setdefault("operacion", {})["min_conf"] = v
         self._guardar_cfg()
-        return (f"[OK] min_score = {int(val_str)}\nEl bot opera solo si |score| >= {int(val_str)} "
+        return (f"[OK] min_conf = {v}\nEl bot opera solo si |p-0.5| >= {v} "
                 f"(mas alto = menos ops, mas selectivo).\nSe aplicara en el proximo ciclo (hot-reload).")
 
     def _ver_atr(self):

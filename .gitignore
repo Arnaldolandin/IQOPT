@@ -11,9 +11,22 @@ __pycache__/
 
 # Logs de ejecución
 logs/*.log
+*.log
 bot_run.log
 bot_err.log
 rsi_iq.log
+bot_demo*.log
+mejora_out.txt
+
+# Caches de datos OHLC (grandes; se regeneran con los descargadores)
+cache_ohlc/
+cache_ohlc_1m/
+cache_ohlc_5m/
+cache_ohlc_30m/
+cache_closes/
+
+# Herramientas locales
+.opencode/
 
 # Archivos temporales / pendientes generados en runtime
 operaciones_temp.txt

@@ -4,13 +4,14 @@
 #   CALL cuando el precio cruza por DEBAJO de la banda inferior (rebote).
 #   PUT  cuando el precio cruza por ENCIMA de la banda superior.
 #   Filtro ATR opcional (volatilidad minima). Multi-hilo, hasta max_trades a la vez.
-#   Estrategia UNICA: predictor de confluencia (6 votos). Config -> "operacion.min_score".
+#   Estrategia UNICA: predictor con 13 indicadores y pesos aprendidos (logistica). Config -> "operacion.min_conf".
 #
 #   .venv314\Scripts\python.exe main.py            # DEMO
 #   .venv314\Scripts\python.exe main.py --dry      # solo loguea senales
 #   .venv314\Scripts\python.exe main.py --real     # CUIDADO
 import argparse
 import json
+import math
 import os
 import time
 import threading
@@ -150,6 +151,14 @@ def verificar_conexion(api):
 
 def obtener_activos_binarios(api):
     configurados = CFG.get("pares_binarios", [])
+    op = CFG.get("operacion", {})
+    # solo_par: si esta definido, el bot opera UNICAMENTE ese activo (no destruye la lista)
+    solo = (op.get("solo_par") or "").strip()
+    if solo:
+        configurados = [solo]
+    # excluir_otc: opera solo los pares regulares (reales), descarta los -OTC
+    if op.get("excluir_otc"):
+        configurados = [p for p in configurados if "-OTC" not in p]
     if not configurados:
         return []
     try:
@@ -203,44 +212,80 @@ def ema(c, span):
     return out
 
 
-def _rsi_val(c, p=14):
-    d = np.diff(c)
-    up = np.where(d > 0, d, 0.0); dn = np.where(d < 0, -d, 0.0)
-    if len(up) < p:
-        return 50.0
-    au = up[-p:].mean(); ad = dn[-p:].mean()
-    return 100.0 - 100.0 / (1.0 + au / ad) if ad > 0 else 100.0
+# Pesos OPTIMIZADOS (regresion logistica sobre 15 indicadores, 6 meses de 5m, train/test OOS).
+# Orden: macd_pos, macd_mom, ema50, ema200, ult3, rsi_ext, stoch_ext, stoch_kd, williamsR,
+#        cci_ext, di_dir, roc, bb_ext, canal_pos, canal_slope
+PESOS_OPT = [-0.02367, -0.01637, -0.02282, -0.00287, -0.01889, 0.01106, 0.0135,
+             -0.02191, 0.0135, -0.02011, 0.00447, -0.00347, 0.04264, 0.02051, -0.01226]
+INTERCEPT_OPT = -0.01608
 
 
-def predecir(closes):
-    """Predictor de confluencia (6 votos). Devuelve (lado, score, info_txt).
-    Mismo analisis que predictor.py: MACD, momentum histograma, EMA50, ult3 velas, RSI, Bollinger."""
-    c = np.asarray(closes, dtype=float)
-    if len(c) < 55:
-        return None, 0, ""
+def _rma_last(x, p):
+    o = float(x[0])
+    for i in range(1, len(x)):
+        o = (o * (p - 1) + x[i]) / p
+    return o
+
+
+def _votos13(h, l, c):
+    """15 votos (+1/-1/0) de la ultima barra, en el orden de PESOS_OPT."""
+    c = np.asarray(c, float); h = np.asarray(h, float); l = np.asarray(l, float)
+    n = len(c)
+    def sg(x):
+        return 1.0 if x > 0 else -1.0 if x < 0 else 0.0
+    v = []
     ml = ema(c, 6) - ema(c, 13); sig = ema(ml, 5); hist = ml - sig
-    ema50 = float(ema(c, 50)[-1])
-    r = _rsi_val(c, 14)
+    v.append(sg(hist[-1]))                                        # macd_pos
+    v.append(sg(hist[-1] - hist[-2]))                            # macd_mom
+    v.append(1.0 if c[-1] > ema(c, 50)[-1] else -1.0)           # ema50
+    v.append(1.0 if c[-1] > ema(c, 200)[-1] else -1.0)         # ema200
+    v.append(1.0 if c[-1] > c[-2] > c[-3] else -1.0 if c[-1] < c[-2] < c[-3] else 0.0)  # ult3
+    d = np.diff(c); up = np.where(d > 0, d, 0.0); dn = np.where(d < 0, -d, 0.0)
+    au = up[-14:].mean(); ad = dn[-14:].mean(); rsi = 100 - 100 / (1 + au / ad) if ad > 0 else 100.0
+    v.append(1.0 if rsi < 30 else -1.0 if rsi > 70 else 0.0)    # rsi_ext
+    def stochk(i):
+        hh = h[i - 13:i + 1].max(); ll = l[i - 13:i + 1].min()
+        return 100 * (c[i] - ll) / (hh - ll) if hh > ll else 50.0
+    kl = stochk(n - 1); dl = (stochk(n - 1) + stochk(n - 2) + stochk(n - 3)) / 3
+    v.append(1.0 if kl < 20 else -1.0 if kl > 80 else 0.0)      # stoch_ext
+    v.append(sg(kl - dl))                                        # stoch_kd
+    hh = h[-14:].max(); ll = l[-14:].min()
+    wr = -100 * (hh - c[-1]) / (hh - ll) if hh > ll else -50.0
+    v.append(1.0 if wr < -80 else -1.0 if wr > -20 else 0.0)    # williamsR
+    tp = (h + l + c) / 3; sma = tp[-20:].mean(); md = np.abs(tp[-20:] - sma).mean()
+    cci = (tp[-1] - sma) / (0.015 * md) if md > 0 else 0.0
+    v.append(1.0 if cci < -100 else -1.0 if cci > 100 else 0.0)  # cci_ext
+    upm = np.zeros(n); dnm = np.zeros(n); upm[1:] = h[1:] - h[:-1]; dnm[1:] = l[:-1] - l[1:]
+    pdm = np.where((upm > dnm) & (upm > 0), upm, 0.0); ndm = np.where((dnm > upm) & (dnm > 0), dnm, 0.0)
+    tr = np.zeros(n); tr[1:] = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
+    atr = _rma_last(tr, 14); pdi = _rma_last(pdm, 14) / atr if atr > 0 else 0; ndi = _rma_last(ndm, 14) / atr if atr > 0 else 0
+    v.append(sg(pdi - ndi))                                      # di_dir
+    v.append(sg(c[-1] / c[-11] - 1) if n > 10 else 0.0)         # roc
     m20 = c[-20:].mean(); s20 = c[-20:].std(); bbz = (c[-1] - m20) / s20 if s20 > 0 else 0.0
-    votos = 0
-    votos += 1 if hist[-1] > 0 else -1                       # posicion MACD
-    votos += 1 if hist[-1] - hist[-2] > 0 else -1            # momentum histograma
-    votos += 1 if c[-1] > ema50 else -1                      # tendencia EMA50
-    if c[-1] > c[-2] > c[-3]:
-        votos += 1
-    elif c[-1] < c[-2] < c[-3]:
-        votos -= 1                                            # ultimas 3 velas
-    if r > 70:
-        votos -= 1
-    elif r < 30:
-        votos += 1                                            # RSI extremo (reversion)
-    if bbz > 2:
-        votos -= 1
-    elif bbz < -2:
-        votos += 1                                            # Bollinger extremo
-    lado = "call" if votos > 0 else "put" if votos < 0 else None
-    info = f"score {votos:+d} | MACD {ml[-1]:+.6f} EMA50 {ema50:.5f} RSI {r:.0f} BBz {bbz:+.2f}"
-    return lado, votos, info
+    v.append(1.0 if bbz < -2 else -1.0 if bbz > 2 else 0.0)     # bb_ext
+    # CANAL DE TENDENCIA DINAMICA (regresion lineal movil N=50)
+    NC = 50; xc = np.arange(NC); xb = xc.mean(); den = ((xc - xb) ** 2).sum()
+    win = c[-NC:]; slope = float(((xc - xb) / den * win).sum())    # pendiente OLS
+    centro = win.mean() + slope * ((NC - 1) / 2.0)                 # linea de regresion al extremo
+    sN = win.std(); czr = (c[-1] - centro) / sN if sN > 0 else 0.0
+    v.append(1.0 if czr < -1 else -1.0 if czr > 1 else 0.0)       # canal_pos (extremo del canal)
+    v.append(sg(slope))                                            # canal_slope (direccion del canal)
+    return v, rsi, bbz
+
+
+def predecir(closes, highs, lows):
+    """Predictor con 13 indicadores y PESOS OPTIMIZADOS (logistica).
+    Devuelve (lado, confianza, info_txt). confianza = |p-0.5|."""
+    c = np.asarray(closes, dtype=float)
+    if len(c) < 210:
+        return None, 0.0, ""
+    votos, rsi, bbz = _votos13(highs, lows, closes)
+    z = INTERCEPT_OPT + sum(w * vt for w, vt in zip(PESOS_OPT, votos))
+    p = 1.0 / (1.0 + math.exp(-max(-30, min(30, z))))
+    conf = abs(p - 0.5)
+    lado = "call" if p > 0.5 else "put"
+    info = f"p {p:.3f} conf {conf:.3f} | RSI {rsi:.0f} BBz {bbz:+.2f}"
+    return lado, conf, info
 
 
 def _parse_result(res, stake, payout):
@@ -302,7 +347,7 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
 
 def run(api, activos, dry=False):
     op = CFG["operacion"]
-    log(f"=== Bot PREDICTOR-confluencia (min_score {op.get('min_score', 3)}) | {len(activos)} activos | "
+    log(f"=== Bot PREDICTOR-optimizado (min_conf {op.get('min_conf', 0.02)}) | {len(activos)} activos | "
         f"ATR min {op.get('min_atr', 0)} | {_instrumento(op['expiry_min'])} {op['expiry_min']}m | "
         f"stake ${op['stake']} | max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
 
@@ -400,14 +445,13 @@ def run(api, activos, dry=False):
                 closes = [float(v["close"]) for v in velas[:-1]]
                 highs = [float(v.get("max", v.get("high", v["close"]))) for v in velas[:-1]]
                 lows = [float(v.get("min", v.get("low", v["close"]))) for v in velas[:-1]]
-                # ── Predictor de confluencia (unica estrategia) ───────────────
-                # Vota con 6 factores (MACD, momentum, EMA50, ult3 velas, RSI, Bollinger).
-                # Opera solo si |score| >= min_score.
-                lado, score, info_txt = predecir(closes)
-                min_score = CFG["operacion"].get("min_score", 3)
-                cumple = lado is not None and abs(score) >= min_score
+                # ── Predictor OPTIMIZADO (13 indicadores, pesos aprendidos) ───
+                # Opera solo si la confianza (|p-0.5|) >= min_conf.
+                lado, conf, info_txt = predecir(closes, highs, lows)
+                min_conf = CFG["operacion"].get("min_conf", 0.02)
+                cumple = lado is not None and conf >= min_conf
                 log(f"  {par:8s} | {info_txt} | "
-                    f"{('SENAL ' + lado.upper()) if cumple else 'sin senal (|score|<' + str(min_score) + ')'}")
+                    f"{('SENAL ' + lado.upper()) if cumple else 'sin senal (conf<' + str(min_conf) + ')'}")
                 if not cumple:
                     continue
 

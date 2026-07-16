@@ -104,8 +104,9 @@ class TelegramCommanderSimple:
         s = self.sesion
         tr = s["trades"]
         wr = (s["wins"] / tr * 100) if tr > 0 else 0
-        pnl = s["pnl"]
-        pnl_s = "+" if pnl >= 0 else ""
+        real = self._pnl_real()
+        pnl_txt = (f"PnL real {self._fmt(real)}" if real is not None
+                   else f"PnL calc {self._fmt(s['pnl'])}")
         filtro = self.cfg.get("filtro_hora", {})
         filtro_on = filtro.get("habilitado", False)
         horas_cfg = filtro.get("horas_por_par", {})
@@ -126,7 +127,7 @@ class TelegramCommanderSimple:
             f"Max trades: {self.cfg.get('max_trades', 1)} | ATR min: {op.get('min_atr', 0)}",
             f"Filtro hora: {'ON' if filtro_on else 'OFF'} ({len(horas_cfg)} pares)",
             f"Hora UTC: {hora_utc} | Chile: {hora_chile}",
-            f"\nSesion: {tr} ops | WR {wr:.1f}% | PnL {pnl_s}${pnl:.2f}",
+            f"\nSesion: {tr} ops | WR {wr:.1f}% | {pnl_txt}",
         ]
         return "\n".join(lines)
 
@@ -216,18 +217,36 @@ class TelegramCommanderSimple:
         threading.Thread(target=lambda: (time.sleep(1), os._exit(0)), daemon=True).start()
         return "[OK] Reiniciando bot..."
 
+    def _pnl_real(self):
+        """PnL autoritativo del broker: balance actual - balance inicial. None si no disponible."""
+        bi = self.sesion.get("balance_inicial")
+        if bi is None:
+            return None
+        try:
+            return float(self.api.get_balance()) - float(bi)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fmt(x):
+        return f"{'+' if x >= 0 else '-'}${abs(x):.2f}"
+
     def _pnl(self):
         s = self.sesion
         tr = s["trades"]
         wr = (s["wins"] / tr * 100) if tr > 0 else 0
-        pnl = s["pnl"]
-        pnl_s = "+" if pnl >= 0 else ""
-        return (
-            f"[PNL] Sesion\n"
-            f"Operaciones: {tr}\n"
-            f"Wins: {s['wins']} ({wr:.1f}% WR)\n"
-            f"PnL: {pnl_s}${pnl:.2f}"
-        )
+        real = self._pnl_real()
+        lines = [
+            "[PNL] Sesion",
+            f"Operaciones: {tr}",
+            f"Wins: {s['wins']} ({wr:.1f}% WR)",
+            f"PnL calculado: {self._fmt(s['pnl'])}",
+        ]
+        if real is not None:
+            lines.append(f"PnL REAL (balance): {self._fmt(real)}")
+            if abs(real - s["pnl"]) > 0.01:
+                lines.append(f"(ojo: difieren {self._fmt(real - s['pnl'])} -> se cayo algun cierre)")
+        return "\n".join(lines)
 
     def _ver_config(self):
         op = self.cfg["operacion"]

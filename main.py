@@ -25,7 +25,7 @@ _balance_mode = "PRACTICE"
 
 _lock = threading.Lock()
 _trades_abiertos = 0
-_sesion = {"trades": 0, "wins": 0, "pnl": 0.0}
+_sesion = {"trades": 0, "wins": 0, "pnl": 0.0, "balance_inicial": None}
 _activos_ref = {"abiertos": 0}
 _cruces_fallidos = set()
 _ultima_ping = time.time()
@@ -558,7 +558,11 @@ def main():
         return
 
     log(f"Activos ({len(activos)}): {', '.join(f'{n}({p*100:.0f}%)' for n, p in activos)}")
-    log(f"Balance: {api.get_balance()}")
+    try:
+        _sesion["balance_inicial"] = float(api.get_balance())
+    except Exception:
+        _sesion["balance_inicial"] = None
+    log(f"Balance: {_sesion['balance_inicial']}")
 
     tg_cfg = CFG.get("telegram", {})
     if tg_cfg.get("habilitado") and tg_cfg.get("token") and tg_cfg.get("chat_id"):

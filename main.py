@@ -212,6 +212,25 @@ def bb_last(closes, period, k):
     return c[-1], c[-2], lo1, lo0, up1, up0
 
 
+def ema(c, span):
+    c = np.asarray(c, float)
+    a = 2.0 / (span + 1)
+    out = np.copy(c)
+    for i in range(1, len(c)):
+        out[i] = a * c[i] + (1 - a) * out[i - 1]
+    return out
+
+
+def macd_last(closes, fast, slow, sig_p):
+    """MACD crossover puro: (macd_now, sig_now, macd_prev, sig_prev) o None."""
+    c = np.asarray(closes, dtype=float)
+    if len(c) < slow + sig_p + 2:
+        return None
+    macd_line = ema(c, fast) - ema(c, slow)
+    sig_line = ema(macd_line, sig_p)
+    return macd_line[-1], sig_line[-1], macd_line[-2], sig_line[-2]
+
+
 def _parse_result(res, stake, payout):
     win_flag, amount = None, None
     if isinstance(res, (list, tuple)):
@@ -271,8 +290,13 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
 
 def run(api, activos, dry=False):
     op = CFG["operacion"]
-    log(f"=== Bot REVERSION-Bollinger | {len(activos)} activos | BB({op.get('bb_period',20)},{op.get('bb_k',2.0)}) | "
-        f"ATR min {op.get('min_atr',0)} | {_instrumento(op['expiry_min'])} {op['expiry_min']}m | stake ${op['stake']} | "
+    est = op.get("estrategia", "bb_rev")
+    if est == "macd":
+        senal = f"MACD-cruce({op.get('macd_fast',6)},{op.get('macd_slow',13)},{op.get('macd_signal',5)})"
+    else:
+        senal = f"BB-reversion({op.get('bb_period',20)},{op.get('bb_k',2.0)})"
+    log(f"=== Bot {senal} | {len(activos)} activos | ATR min {op.get('min_atr',0)} | "
+        f"{_instrumento(op['expiry_min'])} {op['expiry_min']}m | stake ${op['stake']} | "
         f"max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
 
     filtro = CFG.get("filtro_hora", {})
@@ -353,13 +377,17 @@ def run(api, activos, dry=False):
                         continue
 
                 try:
-                    bb_p = CFG["operacion"].get("bb_period", 20)
-                    atr_pp = CFG["operacion"].get("atr_period", 14)
-                    n_velas = min(1000, max(bb_p + 5, atr_pp + 5, 200))
-                    velas = api.get_candles(par, CFG["operacion"]["timeframe_seg"], n_velas, time.time())
+                    op_ = CFG["operacion"]
+                    bb_p = op_.get("bb_period", 20)
+                    atr_pp = op_.get("atr_period", 14)
+                    # ~5x el periodo del indicador mas lento para que CONVERJA (EMA del MACD y filtro EMA).
+                    macd_need = op_.get("macd_slow", 13) * 5 + op_.get("macd_signal", 5)
+                    ema_need = op_.get("macd_ema", 0) * 5
+                    n_velas = min(1000, max(bb_p + 5, atr_pp + 5, macd_need, ema_need, 200))
+                    velas = api.get_candles(par, op_["timeframe_seg"], n_velas, time.time())
                 except Exception:
                     continue
-                if not velas or len(velas) < max(bb_p, atr_pp) + 2:
+                if not velas or len(velas) < max(bb_p, atr_pp, op_.get("macd_slow", 13) + op_.get("macd_signal", 5)) + 2:
                     continue
 
                 vela_cerrada = int(velas[-2]["from"])
@@ -370,22 +398,52 @@ def run(api, activos, dry=False):
                 closes = [float(v["close"]) for v in velas[:-1]]
                 highs = [float(v.get("max", v.get("high", v["close"]))) for v in velas[:-1]]
                 lows = [float(v.get("min", v.get("low", v["close"]))) for v in velas[:-1]]
-                # ── Estrategia: REVERSION Bollinger ───────────────────────────
-                #   CALL: precio cruza por DEBAJO de la banda inferior (rebote).
-                #   PUT:  precio cruza por ENCIMA de la banda superior.
-                bp = CFG["operacion"].get("bb_period", 20)
-                bk = CFG["operacion"].get("bb_k", 2.0)
-                bb = bb_last(closes, bp, bk)
-                if bb is None:
-                    continue
-                cn, cp, lo1, lo0, up1, up0 = bb
+                # ── Generacion de senal segun estrategia ──────────────────────
+                # bb_rev = reversion Bollinger (CALL bajo banda inf, PUT sobre sup)
+                # macd   = cruce MACD; con filtro EMA (macd_ema): solo a favor de la EMA
+                estrategia = CFG["operacion"].get("estrategia", "bb_rev")
                 lado = None
-                if cp >= lo0 and cn < lo1:
-                    lado = "call"
-                elif cp <= up0 and cn > up1:
-                    lado = "put"
-                info_txt = f"px {cn:.5f} BB[{lo1:.5f},{up1:.5f}]"
-                log(f"  {par:8s} | {info_txt} | {'SENAL ' + lado.upper() if lado else 'sin senal'}")
+                info_txt = ""
+
+                if estrategia == "macd":
+                    r = macd_last(closes,
+                                  CFG["operacion"].get("macd_fast", 6),
+                                  CFG["operacion"].get("macd_slow", 13),
+                                  CFG["operacion"].get("macd_signal", 5))
+                    if r is None:
+                        continue
+                    m_now, s_now, m_prev, s_prev = r
+                    if m_prev <= s_prev and m_now > s_now:
+                        lado = "call"
+                    elif m_prev >= s_prev and m_now < s_now:
+                        lado = "put"
+                    info_txt = f"MACD {m_now:+.6f}/{s_now:+.6f}"
+                    log(f"  {par:8s} | MACD {m_now:+.6f} / Sig {s_now:+.6f} | "
+                        f"{'CRUCE ' + lado.upper() if lado else 'sin cruce'}")
+
+                    # Filtro EMA de tendencia: solo operar A FAVOR de la EMA.
+                    ema_p = CFG["operacion"].get("macd_ema", 0)
+                    if lado and ema_p and len(closes) >= ema_p:
+                        ema_v = float(ema(np.asarray(closes, dtype=float), ema_p)[-1])
+                        precio = closes[-1]
+                        if (lado == "call" and precio <= ema_v) or (lado == "put" and precio >= ema_v):
+                            log(f"  [FILTRO-EMA{ema_p}] {par} {lado.upper()} descartado "
+                                f"(contra tendencia: precio {precio:.5f} vs EMA {ema_v:.5f})")
+                            continue
+                        info_txt += f" | EMA{ema_p} {ema_v:.5f}"
+                else:  # bb_rev
+                    bp = CFG["operacion"].get("bb_period", 20)
+                    bk = CFG["operacion"].get("bb_k", 2.0)
+                    bb = bb_last(closes, bp, bk)
+                    if bb is None:
+                        continue
+                    cn, cp, lo1, lo0, up1, up0 = bb
+                    if cp >= lo0 and cn < lo1:
+                        lado = "call"
+                    elif cp <= up0 and cn > up1:
+                        lado = "put"
+                    info_txt = f"px {cn:.5f} BB[{lo1:.5f},{up1:.5f}]"
+                    log(f"  {par:8s} | {info_txt} | {'SENAL ' + lado.upper() if lado else 'sin senal'}")
 
                 if lado is None:
                     continue

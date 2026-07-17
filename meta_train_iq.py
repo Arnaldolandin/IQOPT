@@ -62,6 +62,13 @@ def build_signals(V, Vmtf):
 
 def main():
     files = [f for f in sorted(glob.glob(os.path.join(CACHE, "*.json"))) if "-OTC" not in os.path.basename(f)]
+    if not files:
+        print(f"[ERROR] No hay datos en '{CACHE}/'. Ese cache es gitignored: NO viene con git pull.")
+        print(f"        - Para OPERAR no necesitas reentrenar: models/meta_bbrev_iq.pkl ya esta commiteado.")
+        print(f"        - Si igual queres reentrenar aca, baja los datos primero:")
+        print(f"              python download_ohlc_5m.py     (baja ~6 meses de 5m a {CACHE}/)")
+        print(f"          y despues:  python meta_train_iq.py")
+        return
     rows = []
     for f in files:
         try:

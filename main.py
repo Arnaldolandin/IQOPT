@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import os
+import pickle
 import time
 import threading
 from datetime import datetime, timezone
@@ -288,6 +289,65 @@ def predecir(closes, highs, lows):
     return lado, conf, info
 
 
+# ── Estrategia META-LABELING (portada de Deriv) ──────────────────────────────
+# Primario bbrev (reversion Bollinger 2sigma) elige el lado; un modelo meta
+# (HistGradientBoosting, 32 features) predice P(la senal gana) y filtra. El bot
+# opera si P >= bb_ml_threshold. Modelo: models/meta_bbrev_iq.pkl (meta_train_iq.py).
+_META_MODEL = None
+
+
+def _cargar_meta(path):
+    global _META_MODEL
+    if _META_MODEL is None:
+        with open(path, "rb") as f:
+            _META_MODEL = pickle.load(f)
+    return _META_MODEL
+
+
+def _mtf_resample(V, f=3):
+    """5m -> 15m para las features MTF (agrupa cada f velas)."""
+    return [[g[0][0], g[0][1], max(x[2] for x in g), min(x[3] for x in g), g[-1][4]]
+            for g in (V[i:i + f] for i in range(0, len(V) - f + 1, f))]
+
+
+def predecir_meta(velas):
+    """bbrev + meta-labeling (estrategia de Deriv). velas = lista de dicts de
+    get_candles. Decide sobre la vela CERRADA. Devuelve (lado, P, info)."""
+    import ml_features
+    op = CFG["operacion"]
+    bb_std = op.get("bb_std", 2.0); period = int(op.get("bb_period", 20))
+    vc = velas[:-1]                                  # excluir la vela en formacion
+    if len(vc) < 110:
+        return None, 0.0, ""
+    V = [[float(v.get("from", i)), float(v["open"]),
+          float(v.get("max", v.get("high", v["close"]))),
+          float(v.get("min", v.get("low", v["close"]))), float(v["close"])]
+         for i, v in enumerate(vc)]
+    closes = [x[4] for x in V]
+    w = closes[-period:]; sma = sum(w) / len(w)
+    sd = (sum((x - sma) ** 2 for x in w) / len(w)) ** 0.5
+    if sd <= 0:
+        return None, 0.0, ""
+    z = (closes[-1] - sma) / sd
+    if z <= -bb_std:
+        lado = "call"
+    elif z >= bb_std:
+        lado = "put"
+    else:
+        return None, 0.0, f"z {z:+.2f} (sin extremo)"
+    try:
+        Vmtf = _mtf_resample(V); k = len(Vmtf)
+        cmtf = Vmtf[max(0, k - 60):k] if k >= 2 else None
+        fv, _ = ml_features.extract_features(V[-100:], velas_mtf=cmtf)
+        if len(fv) == 0:
+            return None, 0.0, f"z {z:+.2f} (features insuf)"
+        model = _cargar_meta(op.get("bb_ml_model", "models/meta_bbrev_iq.pkl"))
+        p = float(model.predict_proba(fv.reshape(1, -1))[0, 1])
+    except Exception as e:
+        return None, 0.0, f"z {z:+.2f} (err meta: {str(e)[:40]})"
+    return lado, p, f"bbrev z {z:+.2f} {lado.upper()} | meta P {p:.3f}"
+
+
 def _parse_result(res, stake, payout):
     win_flag, amount = None, None
     if isinstance(res, (list, tuple)):
@@ -445,13 +505,22 @@ def run(api, activos, dry=False):
                 closes = [float(v["close"]) for v in velas[:-1]]
                 highs = [float(v.get("max", v.get("high", v["close"]))) for v in velas[:-1]]
                 lows = [float(v.get("min", v.get("low", v["close"]))) for v in velas[:-1]]
-                # ── Predictor OPTIMIZADO (13 indicadores, pesos aprendidos) ───
-                # Opera solo si la confianza (|p-0.5|) >= min_conf.
-                lado, conf, info_txt = predecir(closes, highs, lows)
-                min_conf = CFG["operacion"].get("min_conf", 0.02)
-                cumple = lado is not None and conf >= min_conf
-                log(f"  {par:8s} | {info_txt} | "
-                    f"{('SENAL ' + lado.upper()) if cumple else 'sin senal (conf<' + str(min_conf) + ')'}")
+                # ── Estrategia: 'meta' (bbrev + meta-labeling, portada de Deriv)
+                #    o 'predictor' (13/15 indicadores logisticos). Config -> operacion.estrategia.
+                estrategia = CFG["operacion"].get("estrategia", "meta")
+                if estrategia == "meta":
+                    lado, score, info_txt = predecir_meta(velas)
+                    thr = CFG["operacion"].get("bb_ml_threshold", 0.60)
+                    cumple = lado is not None and score >= thr
+                    log(f"  {par:8s} | {info_txt} | " + (
+                        ("SENAL " + lado.upper()) if cumple else
+                        ("descartada meta (P<" + str(thr) + ")" if lado else "sin senal bbrev")))
+                else:
+                    lado, conf, info_txt = predecir(closes, highs, lows)
+                    min_conf = CFG["operacion"].get("min_conf", 0.02)
+                    cumple = lado is not None and conf >= min_conf
+                    log(f"  {par:8s} | {info_txt} | "
+                        f"{('SENAL ' + lado.upper()) if cumple else 'sin senal (conf<' + str(min_conf) + ')'}")
                 if not cumple:
                     continue
 

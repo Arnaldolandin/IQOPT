@@ -1,6 +1,22 @@
 {
   "email": "tu_email@ejemplo.com",
   "password": "TU_PASSWORD_IQ",
+  "operacion": {
+    "timeframe_seg": 300,
+    "expiry_min": 10,
+    "stake": 100.0,
+    "min_payout": 0.8,
+    "estrategia": "meta",
+    "bb_std": 2.0,
+    "bb_period": 20,
+    "bb_ml_threshold": 0.6,
+    "bb_ml_model": "models/meta_bbrev_iq.pkl",
+    "min_conf": 0.02,
+    "solo_par": "",
+    "excluir_otc": true,
+    "atr_period": 14,
+    "min_atr": 0.0
+  },
   "telegram": {
     "habilitado": false,
     "token": "",

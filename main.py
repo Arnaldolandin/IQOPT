@@ -394,7 +394,11 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
                 ok, oid = False, f"excepcion: {str(e)[:60]}"
             if ok:
                 break
-            motivo = str(oid)[:80] if oid else "buy rechazado (timing/'buy late' o no disponible)"
+            motivo = str(oid)[:80] if oid else "buy rechazado (timing/'buy late')"
+            # 'not available' = mercado cerrado (fin de semana/off-hours): NO reintentar,
+            # el retry no ayuda. Solo reintentar fallos transitorios (timing/'buy late').
+            if "not available" in motivo.lower() or "no disponible" in motivo.lower():
+                break
             if intento < 2:
                 log(f"[RETRY {intento+1}/2] {par} {lado.upper()}: {motivo}")
                 time.sleep(1.0)

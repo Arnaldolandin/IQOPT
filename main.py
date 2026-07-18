@@ -384,9 +384,21 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
     # El contador (sumar_trade) ya fue incrementado por el hilo principal
     # ANTES de lanzar este thread, para que hay_capacidad() no se pase de max_trades.
     try:
-        ok, oid = api.buy(stake, f"{par}-op", lado, expiry)
+        # Reintenta el buy hasta 3 veces (fallos por timing/'buy late' suelen entrar
+        # en el 2do intento cuando el periodo rota). Captura el motivo real.
+        ok, oid, motivo = False, None, ""
+        for intento in range(3):
+            try:
+                ok, oid = api.buy(stake, f"{par}-op", lado, expiry)
+            except Exception as e:
+                ok, oid = False, f"excepcion: {str(e)[:60]}"
+            if ok:
+                break
+            motivo = str(oid)[:80] if oid else "buy rechazado (timing/'buy late' o no disponible)"
+            if intento < 2:
+                log(f"[RETRY {intento+1}/2] {par} {lado.upper()}: {motivo}")
+                time.sleep(1.0)
         if not ok:
-            motivo = str(oid)[:60] if oid else "desconocido"
             log(f"[SKIP] {par} {lado.upper()}: {motivo}")
             with _lock:
                 _cruces_fallidos.add(f"{par}-{vela_id}")

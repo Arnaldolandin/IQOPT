@@ -11,6 +11,7 @@
     "bb_period": 20,
     "bb_ml_threshold": 0.6,
     "bb_ml_model": "models/meta_bbrev_iq.pkl",
+    "usar_combo": true,
     "min_conf": 0.02,
     "solo_par": "",
     "excluir_otc": true,

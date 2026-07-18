@@ -39,7 +39,9 @@ def resample_mtf(velas, factor=3):
 
 
 def build_signals(V, Vmtf):
-    closes = [v[4] for v in V]; N = len(V); out = []
+    # COMBO mr_combo: bbrev (Bollinger 2sigma) primero; si no dispara, stoch (%K extremo).
+    closes = [v[4] for v in V]; highs = [v[2] for v in V]; lows = [v[3] for v in V]
+    N = len(V); out = []
     mtf_ep = [v[0] for v in Vmtf]
     import bisect
     for i in range(max(PERIOD, 60), N - NCON):
@@ -48,6 +50,10 @@ def build_signals(V, Vmtf):
             continue
         z = (closes[i] - sma) / sd
         side = "CALL" if z <= -K else "PUT" if z >= K else None
+        if side is None:                                  # stoch como 2do primario
+            pk = 14; hh = max(highs[i - pk + 1:i + 1]); ll = min(lows[i - pk + 1:i + 1])
+            kk = 100 * (closes[i] - ll) / (hh - ll) if hh > ll else 50.0
+            side = "CALL" if kk < 20 else "PUT" if kk > 80 else None
         if side is None:
             continue
         win = V[max(0, i - 99):i + 1]; ep = win[-1][0]

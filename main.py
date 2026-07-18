@@ -329,10 +329,22 @@ def predecir_meta(velas):
     if sd <= 0:
         return None, 0.0, ""
     z = (closes[-1] - sma) / sd
+    # Primario 1: bbrev (extremo Bollinger).
     if z <= -bb_std:
-        lado = "call"
+        lado = "call"; trig = f"bbrev z {z:+.2f}"
     elif z >= bb_std:
-        lado = "put"
+        lado = "put"; trig = f"bbrev z {z:+.2f}"
+    elif op.get("usar_combo", True):
+        # Primario 2 (combo): stoch %K extremo si bbrev no disparo.
+        highs = [x[2] for x in V]; lows = [x[3] for x in V]; pk = 14
+        hh = max(highs[-pk:]); ll = min(lows[-pk:])
+        kk = 100 * (closes[-1] - ll) / (hh - ll) if hh > ll else 50.0
+        if kk < 20:
+            lado = "call"; trig = f"stoch %K {kk:.0f}"
+        elif kk > 80:
+            lado = "put"; trig = f"stoch %K {kk:.0f}"
+        else:
+            return None, 0.0, f"z {z:+.2f} %K {kk:.0f} (sin extremo)"
     else:
         return None, 0.0, f"z {z:+.2f} (sin extremo)"
     try:
@@ -340,12 +352,12 @@ def predecir_meta(velas):
         cmtf = Vmtf[max(0, k - 60):k] if k >= 2 else None
         fv, _ = ml_features.extract_features(V[-100:], velas_mtf=cmtf)
         if len(fv) == 0:
-            return None, 0.0, f"z {z:+.2f} (features insuf)"
+            return None, 0.0, f"{trig} (features insuf)"
         model = _cargar_meta(op.get("bb_ml_model", "models/meta_bbrev_iq.pkl"))
         p = float(model.predict_proba(fv.reshape(1, -1))[0, 1])
     except Exception as e:
-        return None, 0.0, f"z {z:+.2f} (err meta: {str(e)[:40]})"
-    return lado, p, f"bbrev z {z:+.2f} {lado.upper()} | meta P {p:.3f}"
+        return None, 0.0, f"{trig} (err meta: {str(e)[:40]})"
+    return lado, p, f"{trig} {lado.upper()} | meta P {p:.3f}"
 
 
 def _parse_result(res, stake, payout):

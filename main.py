@@ -304,12 +304,6 @@ def _cargar_meta(path):
     return _META_MODEL
 
 
-def _mtf_resample(V, f=3):
-    """5m -> 15m para las features MTF (agrupa cada f velas)."""
-    return [[g[0][0], g[0][1], max(x[2] for x in g), min(x[3] for x in g), g[-1][4]]
-            for g in (V[i:i + f] for i in range(0, len(V) - f + 1, f))]
-
-
 def predecir_meta(velas):
     """bbrev + meta-labeling (estrategia de Deriv). velas = lista de dicts de
     get_candles. Decide sobre la vela CERRADA. Devuelve (lado, P, info)."""
@@ -348,8 +342,9 @@ def predecir_meta(velas):
     else:
         return None, 0.0, f"z {z:+.2f} (sin extremo)"
     try:
-        Vmtf = _mtf_resample(V); k = len(Vmtf)
-        cmtf = Vmtf[max(0, k - 60):k] if k >= 2 else None
+        # MTF anclado a la vela de decision (misma convencion que meta_train_iq.py).
+        cmtf = ml_features.mtf_hasta(V, factor=3, max_barras=60)
+        cmtf = cmtf if len(cmtf) >= 2 else None
         fv, _ = ml_features.extract_features(V[-100:], velas_mtf=cmtf)
         if len(fv) == 0:
             return None, 0.0, f"{trig} (features insuf)"

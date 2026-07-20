@@ -7,7 +7,7 @@
 #   .venv314\Scripts\python.exe meta_train_iq.py
 import os, json, glob, pickle, warnings
 import numpy as np
-from ml_features import extract_features
+from ml_features import extract_features, mtf_hasta
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 warnings.filterwarnings("ignore")
@@ -29,21 +29,10 @@ def cargar_velas(d):
     return [[float(t[i]), float(o[i]), float(h[i]), float(l[i]), float(c[i])] for i in range(len(c))]
 
 
-def resample_mtf(velas, factor=3):
-    """5m -> 15m (agrupa cada 'factor' velas) para las features MTF."""
-    out = []
-    for i in range(0, len(velas) - factor + 1, factor):
-        g = velas[i:i + factor]
-        out.append([g[0][0], g[0][1], max(x[2] for x in g), min(x[3] for x in g), g[-1][4]])
-    return out
-
-
-def build_signals(V, Vmtf):
+def build_signals(V):
     # COMBO mr_combo: bbrev (Bollinger 2sigma) primero; si no dispara, stoch (%K extremo).
     closes = [v[4] for v in V]; highs = [v[2] for v in V]; lows = [v[3] for v in V]
     N = len(V); out = []
-    mtf_ep = [v[0] for v in Vmtf]
-    import bisect
     for i in range(max(PERIOD, 60), N - NCON):
         w = closes[i - PERIOD + 1:i + 1]; sma = np.mean(w); sd = np.std(w)
         if sd <= 0:
@@ -57,7 +46,10 @@ def build_signals(V, Vmtf):
         if side is None:
             continue
         win = V[max(0, i - 99):i + 1]; ep = win[-1][0]
-        k = bisect.bisect_right(mtf_ep, ep); cmtf = Vmtf[max(0, k - 60):k] if k >= 2 else None
+        # MTF anclado a la vela de decision i (ver mtf_hasta: antes se seleccionaba por
+        # el INICIO de la barra y colaba las 2 velas siguientes -> look-ahead).
+        cmtf = mtf_hasta(V[max(0, i - 179):i + 1], factor=3, max_barras=60)
+        cmtf = cmtf if len(cmtf) >= 2 else None
         fv, _ = extract_features(win, velas_mtf=cmtf)
         if len(fv) == 0:
             continue
@@ -83,8 +75,8 @@ def main():
             continue
         if len(d.get("close", [])) < 400:
             continue
-        V = cargar_velas(d); Vmtf = resample_mtf(V)
-        sig = build_signals(V, Vmtf)
+        V = cargar_velas(d)
+        sig = build_signals(V)
         rows.extend(sig)
         print(f"{os.path.basename(f)[:-5]}: {len(V)} velas -> {len(sig)} senales bbrev", flush=True)
 

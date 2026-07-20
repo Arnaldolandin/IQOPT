@@ -7,13 +7,19 @@
 #   python meta_feats_cache.py [cache_dir] [--fx]
 import os, sys, json, glob, bisect, time, warnings
 import numpy as np
-from ml_features import extract_features
+from ml_features import extract_features, mtf_hasta
 warnings.filterwarnings("ignore")
 CACHE = sys.argv[1] if len(sys.argv) > 1 else "cache_ohlc_5m"
 SOLO_FX = "--fx" in sys.argv
 MTF_ESTRICTO = "--fuga" not in sys.argv        # --fuga = reproduce el bug de look-ahead
+# --combo: 2do primario stoch %K si bbrev no dispara (como main.py con usar_combo).
+# --gap0: etiqueta desde la vela de decision (convencion de meta_train_iq.py) en vez de
+# la siguiente. Para ENTRENAR el modelo de produccion hay que usar ambos, o el modelo
+# no ve los setups de stoch que el bot si opera.
+COMBO = "--combo" in sys.argv
+GAP0 = "--gap0" in sys.argv
 OUT = "cache_feats"
-SUF = "" if MTF_ESTRICTO else "_FUGA"
+SUF = ("" if MTF_ESTRICTO else "_FUGA") + ("_COMBO" if COMBO else "") + ("_G0" if GAP0 else "")
 NCON = 2; K = 2.0; PERIOD = 20; GAP = 1
 FX = set("EURUSD USDJPY GBPUSD AUDUSD USDCHF USDCAD NZDUSD EURGBP EURJPY GBPJPY EURCHF "
          "AUDJPY CADJPY CHFJPY EURAUD EURCAD EURNZD GBPAUD GBPCAD GBPCHF GBPNZD AUDCAD "
@@ -46,6 +52,8 @@ def build(V, Vmtf, mep):
     usan barras ya cerradas en la vela de decision; sin el, se reproduce el bug para
     poder medir cuanto valia la fuga."""
     closes = [v[4] for v in V]; N = len(V)
+    highs = [v[2] for v in V]; lows = [v[3] for v in V]
+    gap = 0 if GAP0 else GAP
     if not MTF_ESTRICTO:
         mep = [b[0] for b in Vmtf]             # comportamiento antiguo (con look-ahead)
     ts, fs, ys, fz = [], [], [], []
@@ -55,14 +63,22 @@ def build(V, Vmtf, mep):
             continue
         z = (closes[i] - sma) / sd
         side = "CALL" if z <= -K else "PUT" if z >= K else None
+        if side is None and COMBO:             # 2do primario: stoch %K extremo
+            pk = 14; hh = max(highs[i - pk + 1:i + 1]); ll = min(lows[i - pk + 1:i + 1])
+            kk = 100 * (closes[i] - ll) / (hh - ll) if hh > ll else 50.0
+            side = "CALL" if kk < 20 else "PUT" if kk > 80 else None
         if side is None:
             continue
         win = V[max(0, i - 99):i + 1]; ep = win[-1][0]
-        k = bisect.bisect_right(mep, ep); cmtf = Vmtf[max(0, k - 60):k] if k >= 2 else None
+        if MTF_ESTRICTO:                       # anclado a la vela i (igual que el bot)
+            cmtf = mtf_hasta(V[max(0, i - 179):i + 1], factor=3, max_barras=60)
+            cmtf = cmtf if len(cmtf) >= 2 else None
+        else:                                  # bug historico: barras por su INICIO
+            k = bisect.bisect_right(mep, ep); cmtf = Vmtf[max(0, k - 60):k] if k >= 2 else None
         fv, _ = extract_features(win, velas_mtf=cmtf)
         if len(fv) == 0:
             continue
-        base = closes[i + GAP]; fut = closes[i + GAP + NCON]
+        base = closes[i + gap]; fut = closes[i + gap + NCON]
         ts.append(ep); fs.append(fv)
         ys.append(int(fut > base) if side == "CALL" else int(fut < base))
         fz.append(int(fut == base))            # feed parado (mercado cerrado)

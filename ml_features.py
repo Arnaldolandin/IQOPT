@@ -155,6 +155,35 @@ def _bb(velas, periodo=20, desviacion=2.0):
     return float(upper), float(mid), float(lower)
 
 
+def mtf_hasta(velas, factor=3, max_barras=60):
+    """Barras multi-timeframe ANCLADAS a la ultima vela de `velas`.
+
+    Agrupa hacia ATRAS desde el final, de modo que la ultima barra TERMINA exactamente
+    en la vela de decision. Es la unica convencion valida y debe usarse igual en
+    entrenamiento, backtest y produccion.
+
+    Historia del bug que motiva esta funcion (2026-07-20): antes cada sitio agrupaba
+    desde el indice 0 y seleccionaba las barras con
+        k = bisect_right([inicio de cada barra], ep)
+    Como la barra lleva el timestamp de su PRIMERA vela pero agrega high/low/close de
+    las `factor` velas, la barra que EMPIEZA en la vela de decision incluye tambien las
+    2 siguientes -> rsi_mtf/adx_mtf veian el futuro en 1 de cada 3 senales, justo el
+    horizonte de la etiqueta. Valia ~1.5 puntos de win rate ficticio.
+
+    Ademas agrupar desde el indice 0 hace que QUE velas caen juntas dependa de donde
+    empieza la ventana: en vivo (ventana de ~110 velas) la fase no coincidia con la del
+    entrenamiento (historico completo). Anclar al final elimina las dos cosas.
+    """
+    barras = []
+    fin = len(velas)
+    while fin - factor >= 0 and len(barras) < max_barras:
+        g = velas[fin - factor:fin]
+        barras.append([g[0][0], g[0][1], max(x[2] for x in g), min(x[3] for x in g), g[-1][4]])
+        fin -= factor
+    barras.reverse()
+    return barras
+
+
 def extract_features(velas, velas_mtf=None):
     n = len(velas)
     if n < 60:

@@ -8,7 +8,11 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 warnings.filterwarnings("ignore")
 CACHE = "cache_ohlc"; NCON = 2; K = 2.0; PERIOD = 20; BE = 0.532; GAP = 1
-DIAS = 90; UMBRALES = [0.70, 0.65, 0.60, 0.55]
+DIAS = 90
+# Rejilla fina de bb_ml_threshold. Con umbral alto quedan poquisimas señales: un WR
+# alto ahi es ruido, no edge -> se marca con [n bajo] si n < MIN_N.
+UMBRALES = [0.50, 0.52, 0.54, 0.56, 0.58, 0.60, 0.62, 0.64, 0.66, 0.68, 0.70, 0.75]
+MIN_N = 300
 def ev(wr): return 1.88 * wr - 1
 PARAMS = dict(max_iter=250, learning_rate=0.03, max_depth=4, l2_regularization=2.0,
               min_samples_leaf=40, random_state=42)
@@ -69,6 +73,8 @@ def tabla(nombre, rows):
         if n:
             wr = yo[sel].mean()
             fl = "  RENTA" if wr > BE else "  pierde"
+            if n < MIN_N:
+                fl += f"  [n bajo, ruido]"
             print(f"  {u:>7.2f} {wr*100:6.1f}% {ev(wr)*100:+7.1f}% {n:8d} {n/len(yo)*100:5.1f}%{fl}")
         else:
             print(f"  {u:>7.2f}  sin señales")

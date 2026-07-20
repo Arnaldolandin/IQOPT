@@ -400,7 +400,7 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
             if "not available" in motivo.lower() or "no disponible" in motivo.lower():
                 break
             if intento < 2:
-                log(f"[RETRY {intento+1}/2] {par} {lado.upper()}: {motivo}")
+                log(f"[RETRY {intento+1}/3] {par} {lado.upper()}: {motivo}")
                 time.sleep(1.0)
         if not ok:
             log(f"[SKIP] {par} {lado.upper()}: {motivo}")

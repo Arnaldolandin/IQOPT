@@ -24,6 +24,7 @@ cache_ohlc_1m/
 cache_ohlc_5m/
 cache_ohlc_30m/
 cache_closes/
+cache_feats/
 
 # Herramientas locales
 .opencode/

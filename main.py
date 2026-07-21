@@ -128,6 +128,12 @@ def _open_time_ciclo(api):
     vez, se desactiva para toda la sesion y volvemos al comportamiento anterior
     (dejar que IQ rechace en el buy). Nunca bloquear la operativa por esto.
     """
+    # Opt-in: en esta cuenta el endpoint de opciones digitales devuelve None y la
+    # libreria revienta en un hilo propio (traceback inevitable + 10-20s de arranque).
+    # Solo compensa si se operan muchos activos con horarios distintos; con un par de
+    # forex, que esta abierto 24/5, no aporta nada.
+    if not CFG.get("operacion", {}).get("usar_open_time", False):
+        return {}
     if not _open_time_ok[0]:
         return {}
     res = [None]

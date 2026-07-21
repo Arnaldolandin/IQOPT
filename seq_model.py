@@ -11,7 +11,7 @@ import os
 import numpy as np
 
 L_DEFECTO = 64        # velas de contexto
-N_FEATS = 6
+N_FEATS = 7
 ATR_P = 14
 
 
@@ -48,9 +48,12 @@ def ventana_features(V, L=L_DEFECTO):
     ca = np.maximum(oo, cc)
     cb = np.minimum(oo, cc)
     ret = np.diff(np.concatenate([[c[i - L]], cc])) / a
+    # Hora del dia en codificacion circular: hacen falta seno Y coseno. Con solo el
+    # seno, las 3 y las 9 dan el mismo valor (sin es simetrico respecto de las 6) y el
+    # modelo no puede distinguir la manana de la tarde.
     hora = ((t[sl] // 3600) % 24) / 24.0
     f = np.stack([ret, (cc - oo) / a, (hh - ca) / a, (cb - ll) / a, (hh - ll) / a,
-                  np.sin(2 * np.pi * hora)], axis=1)
+                  np.sin(2 * np.pi * hora), np.cos(2 * np.pi * hora)], axis=1)
     if not np.isfinite(f).all():
         return None
     return f.astype(np.float32)
@@ -207,7 +210,17 @@ def predecir_p(velas_iq, path):
     npz = path.replace(".pt", "") + ".npz"
     if os.path.isfile(npz):
         with open(path + ".json", encoding="utf-8") as fh:
-            L = json.load(fh).get("L", L_DEFECTO)
+            cfg = json.load(fh)
+        L = cfg.get("L", L_DEFECTO)
+        # Guarda contra el fallo silencioso: si el modelo se entreno con otro numero
+        # de features que el que produce ventana_features(), las matrices no cuadran.
+        # Sin este chequeo el error seria un ValueError de numpy dentro del except de
+        # predecir_seq, que lo mostraria como un "err seq" cualquiera.
+        n_esperado = cfg.get("n_feats", N_FEATS)
+        if n_esperado != N_FEATS:
+            raise RuntimeError(
+                f"modelo entrenado con {n_esperado} features y ventana_features() "
+                f"produce {N_FEATS}. Reentrena con train_seq_save.py")
         f = ventana_features(V, L)
         if f is None:
             return None

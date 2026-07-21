@@ -28,11 +28,19 @@ if not defined VPY (
     exit /b 1
 )
 
-REM Verificar que el venv elegido tenga torch, no solo que exista.
-"%VPY%" -c "import torch" 2>nul
+REM Verificar que torch IMPORTE, no solo que este instalado. Sin '2>nul': tragarse
+REM stderr aqui oculta la causa real. En Windows lo habitual no es que falte el
+REM paquete sino que falle una DLL (runtime de Visual C++), y el mensaje de error
+REM es lo unico que distingue un caso del otro.
+"%VPY%" -c "import torch"
 if errorlevel 1 (
-    echo [ERROR] El entorno %VPY% no tiene torch instalado.
-    echo Corre: instalar.bat   ^(o^)   "%VPY%" -m pip install -r requirements.txt
+    echo.
+    echo [ERROR] El entorno %VPY% no puede importar torch. El error real esta arriba.
+    echo.
+    echo   - "No module named 'torch'"  -^> falta instalarlo:
+    echo        "%VPY%" -m pip install -r requirements.txt
+    echo   - error de DLL / WinError 126 -^> falta el runtime de Visual C++:
+    echo        https://aka.ms/vs/17/release/vc_redist.x64.exe
     pause
     exit /b 1
 )

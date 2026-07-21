@@ -54,3 +54,5 @@ Thumbs.db
 config.json
 .env
 secrets.local.json
+models/*.pt
+models/*.pt.json

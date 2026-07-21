@@ -72,9 +72,7 @@ class TelegramCommanderSimple:
             elif val in ("off", "no", "false", "0"):
                 return self._toggle_filtro(False)
             return "[ERROR] Uso: /filtrar on|off"
-        elif len(partes) >= 2 and cmd == "/setconf":
-            return self._set_conf(partes[1])
-        elif len(partes) >= 2 and cmd in ("/setumbral", "/setbbml"):
+        elif len(partes) >= 2 and cmd in ("/setumbral", "/setseq"):
             return self._set_umbral(partes[1])
         elif cmd in ("/atr", "/volatilidad"):
             return self._ver_atr()
@@ -107,10 +105,8 @@ class TelegramCommanderSimple:
         hora_chile = (hora_utc + offset) % 24
 
         op = self.cfg.get("operacion", {})
-        _est = op.get("estrategia", "meta")
-        _est_txt = (f"Meta-labeling bbrev (umbral P>={op.get('bb_ml_threshold', 0.6)})"
-                    if _est == "meta"
-                    else f"Predictor optimizado (min_conf {op.get('min_conf', 0.02)})")
+        _est_txt = (f"SEQ {os.path.basename(op.get('seq_model', '?'))} "
+                    f"(thr {op.get('seq_threshold', 0.54)})")
         lines = [
             "[STATUS] Bot IQ Option\n",
             f"Modo: {'REAL' if self._es_real() else 'DEMO'}",
@@ -155,15 +151,11 @@ class TelegramCommanderSimple:
         filtro = self.cfg.get("filtro_hora", {})
         horas = filtro.get("horas_por_par", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        if op.get("estrategia", "meta") == "meta":
-            senal = (f"META-LABELING (portado de Deriv): bbrev (reversion Bollinger "
-                     f"{op.get('bb_std', 2.0)}sigma, periodo {op.get('bb_period', 20)}) elige el lado, y un "
-                     f"meta-modelo (32 features) predice P(la senal gana).\n"
-                     f"Opera solo si hay extremo 2sigma Y meta P >= {op.get('bb_ml_threshold', 0.6)}.")
-        else:
-            senal = (f"PREDICTOR optimizado (13 indicadores, pesos aprendidos por logistica)\n"
-                     f"MACD, EMA50/200, RSI, Stochastic, Williams%R, CCI, ADX/DI, ROC, Bollinger, ult3.\n"
-                     f"Opera CALL/PUT solo si la confianza |p-0.5| >= {op.get('min_conf', 0.02)}.")
+        thr = op.get("seq_threshold", 0.54)
+        senal = (f"SEQ: modelo secuencial (LSTM/Transformer) sobre las ultimas velas "
+                 f"cerradas, sin indicadores ni primario.\n"
+                 f"Modelo: {op.get('seq_model', '?')}\n"
+                 f"Devuelve P(sube) a 2 velas. CALL si P>={thr}, PUT si P<={1-thr:.2f}.")
         return (
             f"[ESTRATEGIA] {senal}\n"
             f"Velas {tf}m | Expiracion {op['expiry_min']}m | Stake ${op['stake']}\n"
@@ -188,8 +180,7 @@ class TelegramCommanderSimple:
             "/setmaxtrades [n] - Max trades simultaneos\n"
             "/setexpiry [min] - Expiracion\n"
             "/setpayout [0.80] - Min payout\n"
-            "/setumbral [x] - Umbral P del meta-modelo (ej 0.55-0.65) [estrategia meta]\n"
-            "/setconf [x] - Umbral de confianza |p-0.5| [estrategia predictor]\n"
+            "/setumbral [x] - Umbral P del modelo seq (ej 0.53-0.60)\n"
             "/atr - Ver filtro de volatilidad ATR\n"
             "/setatr [min] [period] - ATR minimo (0 desactiva)\n"
             "/filtrar on|off - Filtro de hora\n"
@@ -240,14 +231,10 @@ class TelegramCommanderSimple:
         op = self.cfg["operacion"]
         filtro = self.cfg.get("filtro_hora", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        _est = op.get("estrategia", "meta")
-        if _est == "meta":
-            _est_lines = (f"Estrategia: meta-labeling bbrev\n"
-                          f"bb_ml_threshold: {op.get('bb_ml_threshold', 0.6)}\n"
-                          f"bb_std: {op.get('bb_std', 2.0)} | bb_period: {op.get('bb_period', 20)}\n")
-        else:
-            _est_lines = (f"Estrategia: predictor confluencia\n"
-                          f"min_conf: {op.get('min_conf', 0.02)}\n")
+        _est_lines = (f"Estrategia: seq (modelo secuencial)\n"
+                      f"seq_model: {op.get('seq_model', '?')}\n"
+                      f"seq_threshold: {op.get('seq_threshold', 0.54)}\n"
+                      f"solo_par: {op.get('solo_par') or '(todos)'}\n")
         return (
             f"[CONFIG]\n"
             f"{_est_lines}"
@@ -304,30 +291,18 @@ class TelegramCommanderSimple:
         self._guardar_cfg()
         return f"[OK] {clave} = {int(valor_str)}"
 
-    def _set_conf(self, val_str):
-        try:
-            v = float(val_str)
-        except ValueError:
-            return "[ERROR] /setconf [x]  con x tipo 0.02 (umbral de confianza |p-0.5|)"
-        if not (0.0 <= v <= 0.49):
-            return "[ERROR] confianza entre 0 y 0.49"
-        self.cfg.setdefault("operacion", {})["min_conf"] = v
-        self._guardar_cfg()
-        return (f"[OK] min_conf = {v}\nEl bot opera solo si |p-0.5| >= {v} "
-                f"(mas alto = menos ops, mas selectivo).\nSe aplicara en el proximo ciclo (hot-reload).")
-
     def _set_umbral(self, val_str):
-        """Umbral del meta-modelo (bb_ml_threshold): opera si P(gana) >= umbral."""
+        """Umbral del modelo secuencial: CALL si P>=umbral, PUT si P<=1-umbral."""
         try:
             v = float(val_str)
         except ValueError:
-            return "[ERROR] /setumbral [x]  con x tipo 0.60 (umbral P del meta-modelo)"
-        if not (0.5 <= v <= 0.9):
-            return "[ERROR] umbral entre 0.5 y 0.9 (tipico 0.55-0.65)"
-        self.cfg.setdefault("operacion", {})["bb_ml_threshold"] = v
+            return "[ERROR] /setumbral [x]  con x tipo 0.54 (umbral P del modelo seq)"
+        if not (0.5 < v <= 0.9):
+            return "[ERROR] umbral entre 0.5 y 0.9 (tipico 0.53-0.60)"
+        self.cfg.setdefault("operacion", {})["seq_threshold"] = v
         self._guardar_cfg()
-        return (f"[OK] bb_ml_threshold = {v}\nEl bot opera si el meta-modelo da P(gana) >= {v} "
-                f"(mas alto = menos ops, mas selectivo; mas bajo = mas ops, menos calidad).\n"
+        return (f"[OK] seq_threshold = {v}\nCALL si P>={v}, PUT si P<={1-v:.2f}. "
+                f"Mas alto = menos ops y mas selectivo.\n"
                 f"Se aplica en el proximo ciclo (hot-reload).")
 
     def _ver_atr(self):

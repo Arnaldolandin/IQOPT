@@ -1,10 +1,11 @@
-# main.py - Bot REVERSION-Bollinger multi-activo MULTI-HILO en IQ Option.
+# main.py - Bot SECUENCIAL (LSTM / Transformer) multi-activo MULTI-HILO en IQ Option.
 #
-# Estrategia: reversion con Bandas de Bollinger sobre velas cerradas.
-#   CALL cuando el precio cruza por DEBAJO de la banda inferior (rebote).
-#   PUT  cuando el precio cruza por ENCIMA de la banda superior.
+# Estrategia UNICA: 'seq'. Un modelo secuencial mira las ultimas L velas cerradas y
+# devuelve P(sube) a horizonte 2 velas (expiry 10m, binary). Regla simetrica:
+#   CALL si P >= seq_threshold ; PUT si P <= 1 - seq_threshold ; nada en el medio.
+# No hay primario (bbrev/stoch) ni indicadores: el modelo decide solo.
 #   Filtro ATR opcional (volatilidad minima). Multi-hilo, hasta max_trades a la vez.
-#   Estrategia UNICA: predictor con 13 indicadores y pesos aprendidos (logistica). Config -> "operacion.min_conf".
+#   El modelo y su ventana viven en seq_model.py; se entrena con train_seq_save.py.
 #
 #   .venv314\Scripts\python.exe main.py            # DEMO
 #   .venv314\Scripts\python.exe main.py --dry      # solo loguea senales
@@ -204,155 +205,28 @@ def atr_pct(highs, lows, closes, period):
     return atr / precio
 
 
-def ema(c, span):
-    c = np.asarray(c, float)
-    a = 2.0 / (span + 1)
-    out = np.copy(c)
-    for i in range(1, len(c)):
-        out[i] = a * c[i] + (1 - a) * out[i - 1]
-    return out
+def predecir_seq(velas):
+    """Estrategia 'seq': modelo secuencial puro, sin primario bbrev/stoch.
+    Devuelve (lado, P, info). Regla simetrica sobre P(sube).
 
-
-# Pesos OPTIMIZADOS (regresion logistica sobre 15 indicadores, 6 meses de 5m, train/test OOS).
-# Orden: macd_pos, macd_mom, ema50, ema200, ult3, rsi_ext, stoch_ext, stoch_kd, williamsR,
-#        cci_ext, di_dir, roc, bb_ext, canal_pos, canal_slope
-PESOS_OPT = [-0.02367, -0.01637, -0.02282, -0.00287, -0.01889, 0.01106, 0.0135,
-             -0.02191, 0.0135, -0.02011, 0.00447, -0.00347, 0.04264, 0.02051, -0.01226]
-INTERCEPT_OPT = -0.01608
-
-
-def _rma_last(x, p):
-    o = float(x[0])
-    for i in range(1, len(x)):
-        o = (o * (p - 1) + x[i]) / p
-    return o
-
-
-def _votos13(h, l, c):
-    """15 votos (+1/-1/0) de la ultima barra, en el orden de PESOS_OPT."""
-    c = np.asarray(c, float); h = np.asarray(h, float); l = np.asarray(l, float)
-    n = len(c)
-    def sg(x):
-        return 1.0 if x > 0 else -1.0 if x < 0 else 0.0
-    v = []
-    ml = ema(c, 6) - ema(c, 13); sig = ema(ml, 5); hist = ml - sig
-    v.append(sg(hist[-1]))                                        # macd_pos
-    v.append(sg(hist[-1] - hist[-2]))                            # macd_mom
-    v.append(1.0 if c[-1] > ema(c, 50)[-1] else -1.0)           # ema50
-    v.append(1.0 if c[-1] > ema(c, 200)[-1] else -1.0)         # ema200
-    v.append(1.0 if c[-1] > c[-2] > c[-3] else -1.0 if c[-1] < c[-2] < c[-3] else 0.0)  # ult3
-    d = np.diff(c); up = np.where(d > 0, d, 0.0); dn = np.where(d < 0, -d, 0.0)
-    au = up[-14:].mean(); ad = dn[-14:].mean(); rsi = 100 - 100 / (1 + au / ad) if ad > 0 else 100.0
-    v.append(1.0 if rsi < 30 else -1.0 if rsi > 70 else 0.0)    # rsi_ext
-    def stochk(i):
-        hh = h[i - 13:i + 1].max(); ll = l[i - 13:i + 1].min()
-        return 100 * (c[i] - ll) / (hh - ll) if hh > ll else 50.0
-    kl = stochk(n - 1); dl = (stochk(n - 1) + stochk(n - 2) + stochk(n - 3)) / 3
-    v.append(1.0 if kl < 20 else -1.0 if kl > 80 else 0.0)      # stoch_ext
-    v.append(sg(kl - dl))                                        # stoch_kd
-    hh = h[-14:].max(); ll = l[-14:].min()
-    wr = -100 * (hh - c[-1]) / (hh - ll) if hh > ll else -50.0
-    v.append(1.0 if wr < -80 else -1.0 if wr > -20 else 0.0)    # williamsR
-    tp = (h + l + c) / 3; sma = tp[-20:].mean(); md = np.abs(tp[-20:] - sma).mean()
-    cci = (tp[-1] - sma) / (0.015 * md) if md > 0 else 0.0
-    v.append(1.0 if cci < -100 else -1.0 if cci > 100 else 0.0)  # cci_ext
-    upm = np.zeros(n); dnm = np.zeros(n); upm[1:] = h[1:] - h[:-1]; dnm[1:] = l[:-1] - l[1:]
-    pdm = np.where((upm > dnm) & (upm > 0), upm, 0.0); ndm = np.where((dnm > upm) & (dnm > 0), dnm, 0.0)
-    tr = np.zeros(n); tr[1:] = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-    atr = _rma_last(tr, 14); pdi = _rma_last(pdm, 14) / atr if atr > 0 else 0; ndi = _rma_last(ndm, 14) / atr if atr > 0 else 0
-    v.append(sg(pdi - ndi))                                      # di_dir
-    v.append(sg(c[-1] / c[-11] - 1) if n > 10 else 0.0)         # roc
-    m20 = c[-20:].mean(); s20 = c[-20:].std(); bbz = (c[-1] - m20) / s20 if s20 > 0 else 0.0
-    v.append(1.0 if bbz < -2 else -1.0 if bbz > 2 else 0.0)     # bb_ext
-    # CANAL DE TENDENCIA DINAMICA (regresion lineal movil N=50)
-    NC = 50; xc = np.arange(NC); xb = xc.mean(); den = ((xc - xb) ** 2).sum()
-    win = c[-NC:]; slope = float(((xc - xb) / den * win).sum())    # pendiente OLS
-    centro = win.mean() + slope * ((NC - 1) / 2.0)                 # linea de regresion al extremo
-    sN = win.std(); czr = (c[-1] - centro) / sN if sN > 0 else 0.0
-    v.append(1.0 if czr < -1 else -1.0 if czr > 1 else 0.0)       # canal_pos (extremo del canal)
-    v.append(sg(slope))                                            # canal_slope (direccion del canal)
-    return v, rsi, bbz
-
-
-def predecir(closes, highs, lows):
-    """Predictor con 13 indicadores y PESOS OPTIMIZADOS (logistica).
-    Devuelve (lado, confianza, info_txt). confianza = |p-0.5|."""
-    c = np.asarray(closes, dtype=float)
-    if len(c) < 210:
-        return None, 0.0, ""
-    votos, rsi, bbz = _votos13(highs, lows, closes)
-    z = INTERCEPT_OPT + sum(w * vt for w, vt in zip(PESOS_OPT, votos))
-    p = 1.0 / (1.0 + math.exp(-max(-30, min(30, z))))
-    conf = abs(p - 0.5)
-    lado = "call" if p > 0.5 else "put"
-    info = f"p {p:.3f} conf {conf:.3f} | RSI {rsi:.0f} BBz {bbz:+.2f}"
-    return lado, conf, info
-
-
-# ── Estrategia META-LABELING (portada de Deriv) ──────────────────────────────
-# Primario bbrev (reversion Bollinger 2sigma) elige el lado; un modelo meta
-# (HistGradientBoosting, 32 features) predice P(la senal gana) y filtra. El bot
-# opera si P >= bb_ml_threshold. Modelo: models/meta_bbrev_iq.pkl (meta_train_iq.py).
-_META_MODEL = None
-
-
-def _cargar_meta(path):
-    global _META_MODEL
-    if _META_MODEL is None:
-        with open(path, "rb") as f:
-            _META_MODEL = pickle.load(f)
-    return _META_MODEL
-
-
-def predecir_meta(velas):
-    """bbrev + meta-labeling (estrategia de Deriv). velas = lista de dicts de
-    get_candles. Decide sobre la vela CERRADA. Devuelve (lado, P, info)."""
-    import ml_features
+    OJO: el modelo esta atado a la version de seq_model.ventana_features() con la que
+    se entreno. Si se cambia esa funcion hay que reentrenar (train_seq_save.py).
+    """
     op = CFG["operacion"]
-    bb_std = op.get("bb_std", 2.0); period = int(op.get("bb_period", 20))
-    vc = velas[:-1]                                  # excluir la vela en formacion
-    if len(vc) < 110:
-        return None, 0.0, ""
-    V = [[float(v.get("from", i)), float(v["open"]),
-          float(v.get("max", v.get("high", v["close"]))),
-          float(v.get("min", v.get("low", v["close"]))), float(v["close"])]
-         for i, v in enumerate(vc)]
-    closes = [x[4] for x in V]
-    w = closes[-period:]; sma = sum(w) / len(w)
-    sd = (sum((x - sma) ** 2 for x in w) / len(w)) ** 0.5
-    if sd <= 0:
-        return None, 0.0, ""
-    z = (closes[-1] - sma) / sd
-    # Primario 1: bbrev (extremo Bollinger).
-    if z <= -bb_std:
-        lado = "call"; trig = f"bbrev z {z:+.2f}"
-    elif z >= bb_std:
-        lado = "put"; trig = f"bbrev z {z:+.2f}"
-    elif op.get("usar_combo", True):
-        # Primario 2 (combo): stoch %K extremo si bbrev no disparo.
-        highs = [x[2] for x in V]; lows = [x[3] for x in V]; pk = 14
-        hh = max(highs[-pk:]); ll = min(lows[-pk:])
-        kk = 100 * (closes[-1] - ll) / (hh - ll) if hh > ll else 50.0
-        if kk < 20:
-            lado = "call"; trig = f"stoch %K {kk:.0f}"
-        elif kk > 80:
-            lado = "put"; trig = f"stoch %K {kk:.0f}"
-        else:
-            return None, 0.0, f"z {z:+.2f} %K {kk:.0f} (sin extremo)"
-    else:
-        return None, 0.0, f"z {z:+.2f} (sin extremo)"
+    path = op.get("seq_model", "models/seq_lstm_EURUSD.pt")
+    thr = op.get("seq_threshold", 0.54)
     try:
-        # MTF anclado a la vela de decision (misma convencion que meta_train_iq.py).
-        cmtf = ml_features.mtf_hasta(V, factor=3, max_barras=60)
-        cmtf = cmtf if len(cmtf) >= 2 else None
-        fv, _ = ml_features.extract_features(V[-100:], velas_mtf=cmtf)
-        if len(fv) == 0:
-            return None, 0.0, f"{trig} (features insuf)"
-        model = _cargar_meta(op.get("bb_ml_model", "models/meta_bbrev_iq.pkl"))
-        p = float(model.predict_proba(fv.reshape(1, -1))[0, 1])
+        import seq_model
+        p = seq_model.predecir_p(velas, path)
     except Exception as e:
-        return None, 0.0, f"{trig} (err meta: {str(e)[:40]})"
-    return lado, p, f"{trig} {lado.upper()} | meta P {p:.3f}"
+        return None, 0.0, f"(err seq: {type(e).__name__}: {str(e)[:40]})"
+    if p is None:
+        return None, 0.0, "(ventana insuficiente/con huecos)"
+    if p >= thr:
+        return "call", p, f"seq P {p:.3f}"
+    if p <= 1 - thr:
+        return "put", p, f"seq P {p:.3f}"
+    return None, p, f"seq P {p:.3f}"
 
 
 def _parse_result(res, stake, payout):
@@ -430,7 +304,8 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
 
 def run(api, activos, dry=False):
     op = CFG["operacion"]
-    log(f"=== Bot PREDICTOR-optimizado (min_conf {op.get('min_conf', 0.02)}) | {len(activos)} activos | "
+    log(f"=== Bot SEQ ({op.get('seq_model', 'models/seq_lstm_EURUSD.pt')}, "
+        f"thr {op.get('seq_threshold', 0.54)}) | {len(activos)} activos | "
         f"ATR min {op.get('min_atr', 0)} | {_instrumento(op['expiry_min'])} {op['expiry_min']}m | "
         f"stake ${op['stake']} | max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
 
@@ -528,22 +403,18 @@ def run(api, activos, dry=False):
                 closes = [float(v["close"]) for v in velas[:-1]]
                 highs = [float(v.get("max", v.get("high", v["close"]))) for v in velas[:-1]]
                 lows = [float(v.get("min", v.get("low", v["close"]))) for v in velas[:-1]]
-                # ── Estrategia: 'meta' (bbrev + meta-labeling, portada de Deriv)
-                #    o 'predictor' (13/15 indicadores logisticos). Config -> operacion.estrategia.
-                estrategia = CFG["operacion"].get("estrategia", "meta")
-                if estrategia == "meta":
-                    lado, score, info_txt = predecir_meta(velas)
-                    thr = CFG["operacion"].get("bb_ml_threshold", 0.60)
-                    cumple = lado is not None and score >= thr
-                    log(f"  {par:8s} | {info_txt} | " + (
-                        ("SENAL " + lado.upper()) if cumple else
-                        ("descartada meta (P<" + str(thr) + ")" if lado else "sin senal bbrev")))
-                else:
-                    lado, conf, info_txt = predecir(closes, highs, lows)
-                    min_conf = CFG["operacion"].get("min_conf", 0.02)
-                    cumple = lado is not None and conf >= min_conf
-                    log(f"  {par:8s} | {info_txt} | "
-                        f"{('SENAL ' + lado.upper()) if cumple else 'sin senal (conf<' + str(min_conf) + ')'}")
+                # ── Estrategia UNICA: 'seq' - modelo secuencial (LSTM / Transformer).
+                # Predice P(sube) sobre la vela cerrada; regla simetrica: CALL si
+                # P>=thr, PUT si P<=1-thr. La ventana la construye
+                # seq_model.ventana_features(), la MISMA funcion que uso el
+                # entrenamiento: si divergen, el bot alimenta al modelo con features
+                # distintas y falla en silencio.
+                lado, score, info_txt = predecir_seq(velas)
+                thr = CFG["operacion"].get("seq_threshold", 0.54)
+                cumple = lado is not None
+                log(f"  {par:8s} | {info_txt} | " + (
+                    ("SENAL " + lado.upper()) if cumple
+                    else f"sin senal seq (|P-0.5| < {thr-0.5:.3f})"))
                 if not cumple:
                     continue
 

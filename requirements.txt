@@ -1,0 +1,21 @@
+# Dependencias del bot IQOPT (estrategia 'seq': modelo secuencial LSTM/Transformer).
+#
+# La API de IQ Option NO esta en PyPI: se instala desde git.
+# websocket-client DEBE ser 0.56.0; versiones nuevas rompen iqoptionapi.
+#
+#   python -m venv .venv314
+#   .venv314\Scripts\python.exe -m pip install -r requirements.txt   (Windows)
+#   .venv314/bin/python -m pip install -r requirements.txt           (Linux)
+
+git+https://github.com/iqoptionapi/iqoptionapi.git@8a903cc094a74af1ed935a56a2d6b5a9ed3319d7
+websocket-client==0.56.0
+requests==2.34.2
+numpy==2.4.6
+
+# Inferencia y entrenamiento del modelo secuencial. La rueda CPU basta: el modelo es
+# chico (LSTM de 1 capa, 48 unidades) y en GPU no se gana nada relevante.
+torch==2.13.0
+
+# Solo para eurusd_seq.py (baseline HistGradientBoosting con la que se compara el
+# LSTM). El bot NO lo necesita para operar: se puede omitir en el servidor.
+scikit-learn==1.9.0

@@ -65,29 +65,39 @@ def velas_iq_a_filas(velas):
 
 
 # ---------------------------------------------------------------- arquitecturas
-def construir_red(arq, n_feats=N_FEATS, L=L_DEFECTO):
+HP_DEFECTO = {"hidden": 48, "dropout": 0.3, "capas": 2, "heads": 4}
+
+
+def construir_red(arq, n_feats=N_FEATS, L=L_DEFECTO, hp=None):
+    """hp = hiperparametros de ARQUITECTURA (no de entrenamiento). Se guardan junto
+    al modelo: al cargarlo hay que reconstruir exactamente la misma red o los pesos
+    no encajan."""
     import torch.nn as nn
     import torch
+    h = dict(HP_DEFECTO)
+    h.update(hp or {})
 
     class LSTM(nn.Module):
-        def __init__(self, f, hid=48):
+        def __init__(self, f):
             super().__init__()
-            self.rnn = nn.LSTM(f, hid, batch_first=True)
-            self.do = nn.Dropout(0.3)
-            self.fc = nn.Linear(hid, 1)
+            self.rnn = nn.LSTM(f, h["hidden"], batch_first=True,
+                               num_layers=max(1, int(h["capas"])) if h.get("lstm_capas") else 1)
+            self.do = nn.Dropout(h["dropout"])
+            self.fc = nn.Linear(h["hidden"], 1)
 
         def forward(self, x):
             o, _ = self.rnn(x)
             return self.fc(self.do(o[:, -1])).squeeze(-1)
 
     class Trafo(nn.Module):
-        def __init__(self, f, d=48, heads=4, capas=2):
+        def __init__(self, f):
             super().__init__()
+            d = h["hidden"]
             self.inp = nn.Linear(f, d)
             self.pos = nn.Parameter(torch.zeros(1, L, d))
-            cap = nn.TransformerEncoderLayer(d, heads, d * 2, dropout=0.3,
+            cap = nn.TransformerEncoderLayer(d, h["heads"], d * 2, dropout=h["dropout"],
                                              batch_first=True, norm_first=True)
-            self.enc = nn.TransformerEncoder(cap, capas)
+            self.enc = nn.TransformerEncoder(cap, int(h["capas"]))
             self.fc = nn.Linear(d, 1)
 
         def forward(self, x):
@@ -101,12 +111,15 @@ def construir_red(arq, n_feats=N_FEATS, L=L_DEFECTO):
 _CACHE = {}
 
 
-def guardar(net, arq, L, path, meta=None):
+def guardar(net, arq, L, path, hp=None, meta=None):
+    """Guarda pesos + la receta para reconstruir la red. Sin 'hp' aqui, un cambio de
+    hiperparametros en config.json dejaria modelos viejos imposibles de cargar."""
     import torch
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     torch.save(net.state_dict(), path)
     with open(path + ".json", "w", encoding="utf-8") as f:
-        json.dump({"arq": arq, "L": L, "n_feats": N_FEATS, "meta": meta or {}}, f)
+        json.dump({"arq": arq, "L": L, "n_feats": N_FEATS,
+                   "hp": {**HP_DEFECTO, **(hp or {})}, "meta": meta or {}}, f)
 
 
 def cargar(path):
@@ -116,7 +129,8 @@ def cargar(path):
     import torch
     with open(path + ".json", encoding="utf-8") as f:
         cfg = json.load(f)
-    net = construir_red(cfg["arq"], cfg.get("n_feats", N_FEATS), cfg.get("L", L_DEFECTO))
+    net = construir_red(cfg["arq"], cfg.get("n_feats", N_FEATS),
+                        cfg.get("L", L_DEFECTO), cfg.get("hp"))
     net.load_state_dict(torch.load(path, map_location="cpu"))
     net.eval()
     _CACHE[path] = (net, cfg.get("L", L_DEFECTO))

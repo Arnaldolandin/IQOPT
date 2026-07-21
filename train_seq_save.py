@@ -36,7 +36,10 @@ def dataset(par, L):
             continue
         if V[i + H][4] == V[i][4]:                # empate: feed parado
             continue
-        f = S.ventana_features(V[:i + 1], L)
+        # Pasar solo la cola necesaria (L + ATR_P + 1 velas). Con V[:i+1] esto es
+        # CUADRATICO: ventana_features convierte toda la historia a numpy en cada
+        # iteracion -> ~775M operaciones inutiles sobre 39k velas (15 min vs 1 min).
+        f = S.ventana_features(V[max(0, i - (L + S.ATR_P)):i + 1], L)
         if f is None:
             continue
         X.append(f); y.append(int(V[i + H][4] > V[i][4])); t.append(V[i][0])
@@ -62,20 +65,40 @@ def metricas(p, y, t, etq):
                   f"{w*PAYOUT-(1-w):>+9.4f}")
 
 
+def cfg_entrenamiento():
+    """Lee config.json -> 'entrenamiento'. Los flags de CLI, si se pasan, mandan."""
+    try:
+        c = json.load(open("config.json", encoding="utf-8"))
+    except Exception:
+        c = {}
+    d = {"par": "EURUSD", "arquitectura": "lstm", "ventana_L": S.L_DEFECTO,
+         "horizonte": 2, "epocas": 60, "batch_size": 256, "learning_rate": 1e-3,
+         "weight_decay": 1e-2, "paciencia": 8, "test_frac": 0.35, "val_frac": 0.15,
+         "seed": 42, "hp": dict(S.HP_DEFECTO)}
+    d.update(c.get("entrenamiento", {}))
+    d["hp"] = {**S.HP_DEFECTO, **(c.get("entrenamiento", {}).get("hp", {}))}
+    return d
+
+
 def main():
+    E = cfg_entrenamiento()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--par", default="EURUSD")
-    ap.add_argument("--arq", default="lstm", choices=["lstm", "transformer"])
-    ap.add_argument("--L", type=int, default=S.L_DEFECTO)
-    ap.add_argument("--test-frac", type=float, default=0.35)
-    ap.add_argument("--epocas", type=int, default=60)
+    ap.add_argument("--par", default=E["par"])
+    ap.add_argument("--arq", default=E["arquitectura"], choices=["lstm", "transformer"])
+    ap.add_argument("--L", type=int, default=int(E["ventana_L"]))
+    ap.add_argument("--test-frac", type=float, default=float(E["test_frac"]))
+    ap.add_argument("--epocas", type=int, default=int(E["epocas"]))
     ap.add_argument("--salida", default="")
     a = ap.parse_args()
+
+    global H
+    H = int(E["horizonte"])
 
     import torch
     import torch.nn as nn
 
-    print(f"[{a.par}] construyendo ventanas L={a.L} H={H}...", flush=True)
+    print(f"[{a.par}] arq={a.arq} L={a.L} H={H} epocas={a.epocas} "
+          f"bs={E['batch_size']} lr={E['learning_rate']} hp={E['hp']}", flush=True)
     X, y, t = dataset(a.par, a.L)
     print(f"muestras {len(X)} | tasa base P(sube) {100*y.mean():.2f}%")
 
@@ -85,22 +108,25 @@ def main():
     f_ = lambda z: datetime.fromtimestamp(z, timezone.utc).strftime("%Y-%m-%d")
     print(f"corte {f_(corte)} | train {int(m_tr.sum())} | test {int(m_te.sum())}")
 
+    torch.manual_seed(int(E["seed"]))
     Xtr, ytr = X[m_tr], y[m_tr]
-    k = int(0.85 * len(Xtr))                 # validacion temporal, nunca aleatoria
+    k = int((1.0 - float(E["val_frac"])) * len(Xtr))   # validacion temporal, nunca aleatoria
     Xv, yv = Xtr[k:], ytr[k:]
     Xt, yt = Xtr[:k], ytr[:k]
 
-    net = S.construir_red(a.arq, S.N_FEATS, a.L)
-    opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-2)
+    net = S.construir_red(a.arq, S.N_FEATS, a.L, E["hp"])
+    opt = torch.optim.AdamW(net.parameters(), lr=float(E["learning_rate"]),
+                            weight_decay=float(E["weight_decay"]))
     lossf = nn.BCEWithLogitsLoss()
+    bs = int(E["batch_size"])
     Xt_t, yt_t = torch.tensor(Xt), torch.tensor(yt, dtype=torch.float32)
     Xv_t, yv_t = torch.tensor(Xv), torch.tensor(yv, dtype=torch.float32)
     mejor, mejor_est, pac = 1e9, None, 0
     for ep in range(a.epocas):
         net.train()
         perm = torch.randperm(len(Xt_t))
-        for j in range(0, len(perm), 256):
-            idx = perm[j:j + 256]
+        for j in range(0, len(perm), bs):
+            idx = perm[j:j + bs]
             opt.zero_grad()
             lossf(net(Xt_t[idx]), yt_t[idx]).backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -113,7 +139,7 @@ def main():
             mejor_est = {kk: vv.clone() for kk, vv in net.state_dict().items()}
         else:
             pac += 1
-            if pac >= 8:
+            if pac >= int(E["paciencia"]):
                 break
         if ep % 10 == 0:
             print(f"  ep {ep:3d} val_loss {vl:.5f}", flush=True)
@@ -126,9 +152,11 @@ def main():
     metricas(p, y[m_te], t[m_te], f"{a.arq.upper()} {a.par} (val_loss {mejor:.5f})")
 
     salida = a.salida or f"models/seq_{a.arq}_{a.par}.pt"
-    S.guardar(net, a.arq, a.L, salida,
+    S.guardar(net, a.arq, a.L, salida, hp=E["hp"],
               meta={"par": a.par, "H": H, "val_loss": mejor,
-                    "corte": f_(corte), "n_train": int(len(Xt))})
+                    "corte": f_(corte), "n_train": int(len(Xt)),
+                    "epocas_max": a.epocas, "batch_size": int(E["batch_size"]),
+                    "lr": float(E["learning_rate"])})
     print(f"\n[SAVE] {salida}  (+ .json con arq/L/meta)")
 
 

@@ -116,6 +116,55 @@ def _instrumento(expiry):
     return "turbo" if expiry <= 5 else "binary"
 
 
+_open_time_ok = [True]
+
+
+def _open_time_ciclo(api):
+    """get_all_open_time() con timeout y auto-desactivacion.
+
+    La libreria lanza hilos internos para las opciones digitales; si ese endpoint
+    devuelve None, el hilo muere con TypeError FUERA de nuestro try/except y la
+    llamada puede quedarse colgada. Por eso: hilo propio con timeout y, si falla una
+    vez, se desactiva para toda la sesion y volvemos al comportamiento anterior
+    (dejar que IQ rechace en el buy). Nunca bloquear la operativa por esto.
+    """
+    if not _open_time_ok[0]:
+        return {}
+    res = [None]
+
+    def _c():
+        try:
+            res[0] = api.get_all_open_time()
+        except Exception:
+            res[0] = None
+
+    t = threading.Thread(target=_c, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    if t.is_alive() or not isinstance(res[0], dict):
+        _open_time_ok[0] = False
+        log("[OPEN-TIME] get_all_open_time fallo o se colgo -> desactivado por esta "
+            "sesion; IQ decidira en el buy")
+        return {}
+    return res[0]
+
+
+def _mercado_abierto(abiertos, par, expiry):
+    """True si el activo acepta ordenes ahora, segun get_all_open_time().
+
+    Las claves de open_time son el nombre pelado ("EURUSD", "AIG-OTC"), sin el "-op"
+    de get_all_profit(). Si la consulta fallo o el activo no aparece, devolvemos True:
+    ante la duda dejamos que IQ decida en el buy (comportamiento anterior) en vez de
+    bloquear operativa por un fallo de la API.
+    """
+    if not abiertos:
+        return True
+    info = abiertos.get(_instrumento(expiry), {}).get(par)
+    if not isinstance(info, dict) or "open" not in info:
+        return True
+    return bool(info["open"])
+
+
 def verificar_conexion(api):
     global _conectado, _ultima_ping
     ahora = time.time()
@@ -364,6 +413,11 @@ def run(api, activos, dry=False):
             except Exception:
                 profits_ciclo = {}
 
+            # Idem para el horario del mercado. OJO: el payout NO sirve de proxy, IQ
+            # lo devuelve tambien con el activo cerrado -> el par pasaba el filtro y el
+            # cierre solo se descubria al comprar ("the asset is not available").
+            abiertos_ciclo = _open_time_ciclo(api)
+
             for par, payout in activos:
                 stake = CFG["operacion"]["stake"]
                 expiry = CFG["operacion"]["expiry_min"]
@@ -377,6 +431,10 @@ def run(api, activos, dry=False):
                 p = profits_ciclo.get(_profit_key(par), {}).get(_instrumento(expiry))
                 payout_ok = p is not None and p >= CFG["operacion"]["min_payout"]
                 if not payout_ok:
+                    continue
+
+                # Mercado cerrado -> ni bajar velas ni calcular indicadores.
+                if not _mercado_abierto(abiertos_ciclo, par, expiry):
                     continue
 
                 filtro = CFG.get("filtro_hora", {})

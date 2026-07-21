@@ -25,6 +25,11 @@ cache_ohlc_5m/
 cache_ohlc_30m/
 cache_closes/
 cache_feats/
+cache_feats_directo/
+
+# Salidas regenerables de los backtests (grandes; se rehacen con los scripts)
+bt_horas_senales.json
+bt_probe.json
 
 # Herramientas locales
 .opencode/

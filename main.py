@@ -209,6 +209,15 @@ def verificar_conexion(api):
 def obtener_activos_binarios(api):
     configurados = CFG.get("pares_binarios", [])
     op = CFG.get("operacion", {})
+    # Con 'modelos_por_par' la lista efectiva son los pares QUE TIENEN MODELO. Escanear
+    # los demas es gasto puro: modelo_de() les devuelve None y nunca se operan, pero
+    # igual se les pediria payout y velas, ensuciando el log y las llamadas a la API.
+    mapa = op.get("modelos_por_par") or {}
+    if mapa:
+        configurados = [p for p in configurados if p in mapa]
+        faltan = [p for p in mapa if p not in configurados]
+        if faltan:
+            log(f"[AVISO] con modelo pero fuera de pares_binarios: {', '.join(faltan)}")
     # solo_par: si esta definido, el bot opera UNICAMENTE ese activo (no destruye la lista)
     solo = (op.get("solo_par") or "").strip()
     if solo:

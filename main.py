@@ -260,7 +260,24 @@ def atr_pct(highs, lows, closes, period):
     return atr / precio
 
 
-def predecir_seq(velas):
+def modelo_de(par):
+    """Ruta del modelo que le corresponde a este par.
+
+    Cada par se evalua con SU modelo: uno entrenado con EURUSD no tiene ningun
+    respaldo aplicado a BTCUSD, la dinamica es distinta. Si el par no figura en
+    'modelos_por_par' se devuelve None y el par NO se opera: es preferible no operar
+    a operar con un modelo ajeno.
+    """
+    op = CFG.get("operacion", {})
+    mapa = op.get("modelos_por_par") or {}
+    if par in mapa:
+        return mapa[par]
+    if not mapa:                      # compat: config viejo con un solo modelo
+        return op.get("seq_model")
+    return None
+
+
+def predecir_seq(velas, par=None):
     """Estrategia 'seq': modelo secuencial puro, sin primario bbrev/stoch.
     Devuelve (lado, P, info). Regla simetrica sobre P(sube).
 
@@ -268,7 +285,9 @@ def predecir_seq(velas):
     se entreno. Si se cambia esa funcion hay que reentrenar (train_seq_save.py).
     """
     op = CFG["operacion"]
-    path = op.get("seq_model", "models/seq_lstm_EURUSD.pt")
+    path = modelo_de(par) if par else op.get("seq_model", "models/seq_lstm_EURUSD.pt")
+    if not path:
+        return None, 0.0, f"(sin modelo para {par}; no se opera)"
     thr = op.get("seq_threshold", 0.54)
     try:
         import seq_model
@@ -359,8 +378,9 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
 
 def run(api, activos, dry=False):
     op = CFG["operacion"]
-    log(f"=== Bot SEQ ({op.get('seq_model', 'models/seq_lstm_EURUSD.pt')}, "
-        f"thr {op.get('seq_threshold', 0.54)}) | {len(activos)} activos | "
+    _mods = op.get("modelos_por_par") or {"(unico)": op.get("seq_model")}
+    log(f"=== Bot SEQ (modelos: {', '.join(f'{k}->{os.path.basename(v)}' for k, v in _mods.items())}"
+        f" | thr {op.get('seq_threshold', 0.54)}) | {len(activos)} activos | "
         f"ATR min {op.get('min_atr', 0)} | {_instrumento(op['expiry_min'])} {op['expiry_min']}m | "
         f"stake ${op['stake']} | max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
 
@@ -473,7 +493,7 @@ def run(api, activos, dry=False):
                 # seq_model.ventana_features(), la MISMA funcion que uso el
                 # entrenamiento: si divergen, el bot alimenta al modelo con features
                 # distintas y falla en silencio.
-                lado, score, info_txt = predecir_seq(velas)
+                lado, score, info_txt = predecir_seq(velas, par)
                 thr = CFG["operacion"].get("seq_threshold", 0.54)
                 cumple = lado is not None
                 log(f"  {par:8s} | {info_txt} | " + (

@@ -28,23 +28,33 @@ if not defined VPY (
     exit /b 1
 )
 
-REM Verificar que torch IMPORTE, no solo que este instalado. Sin '2>nul': tragarse
-REM stderr aqui oculta la causa real. En Windows lo habitual no es que falte el
-REM paquete sino que falle una DLL (runtime de Visual C++), y el mensaje de error
-REM es lo unico que distingue un caso del otro.
-"%VPY%" -c "import torch"
-if errorlevel 1 (
-    echo.
-    echo [ERROR] El entorno %VPY% no puede importar torch. El error real esta arriba.
-    echo.
-    echo   - "No module named 'torch'"  -^> falta instalarlo:
-    echo        "%VPY%" -m pip install -r requirements.txt
-    echo   - error de DLL / WinError 126 -^> falta el runtime de Visual C++:
-    echo        https://aka.ms/vs/17/release/vc_redist.x64.exe
-    pause
-    exit /b 1
+REM Con el .npz presente la inferencia va en numpy puro y torch NO hace falta.
+REM Se prefiere asi: en Windows Server torch falla a menudo al cargar c10.dll
+REM (WinError 1114) por el runtime de Visual C++ o por un CPU sin AVX2, y son 122 MB
+REM para hacer unas pocas multiplicaciones de matrices.
+if exist "models\seq_lstm_EURUSD.npz" (
+    "%VPY%" -c "import numpy"
+    if errorlevel 1 (
+        echo [ERROR] El entorno %VPY% no tiene numpy.
+        echo    "%VPY%" -m pip install -r requirements.txt
+        pause
+        exit /b 1
+    )
+    echo Entorno: %VPY%  ^(inferencia en numpy, sin torch^)
+) else (
+    "%VPY%" -c "import torch"
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Falta el .npz y torch no importa. El error real esta arriba.
+        echo.
+        echo   - "No module named 'torch'"   -^> "%VPY%" -m pip install -r requirements.txt
+        echo   - error de DLL / WinError     -^> pedi el .npz a la maquina de entrenamiento
+        echo                                    ^(exportar_npz.py^) y copialo a models\
+        pause
+        exit /b 1
+    )
+    echo Entorno: %VPY%  ^(inferencia con torch^)
 )
-echo Entorno: %VPY%
 
 if not exist "config.json" (
     echo [ERROR] Falta config.json ^(tiene las credenciales, no viaja con git^)

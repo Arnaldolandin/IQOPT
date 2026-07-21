@@ -17,12 +17,20 @@ websocket-client==0.56.0
 requests>=2.28
 numpy>=1.24,<3
 
-# Inferencia y entrenamiento. La rueda CPU basta: el modelo es chico (LSTM de 1 capa,
-# 48 unidades) y en GPU no se gana nada relevante.
-# Los .pt se guardan como state_dict (tensores + metadatos), formato estable entre
-# versiones: un modelo entrenado con 2.13 carga sin problema en 2.2+.
+# ---------------------------------------------------------------------------
+# HASTA AQUI es todo lo que necesita el bot para OPERAR.
+#
+# Si en models/ hay un .npz (lo genera exportar_npz.py), la inferencia va en numpy
+# puro y torch NO hace falta. Recomendado en servidores: en Windows Server torch
+# falla a menudo al cargar c10.dll (WinError 1114) por el runtime de Visual C++ o
+# por un CPU sin AVX2, y son 122 MB para unas pocas multiplicaciones de matrices.
+#
+# Lo de abajo es SOLO para ENTRENAR. En un servidor que unicamente opera, instalar:
+#   pip install -r requirements.txt --no-deps   (o comentar estas dos lineas)
+# ---------------------------------------------------------------------------
+
+# Entrenamiento del modelo secuencial (train_seq_save.py).
 torch>=2.2
 
-# Solo para eurusd_seq.py (baseline HistGradientBoosting contra la que se compara el
-# LSTM). El bot NO lo necesita para operar: se puede omitir en el servidor.
+# Baseline HistGradientBoosting de eurusd_seq.py, para comparar contra el LSTM.
 scikit-learn>=1.3

@@ -111,15 +111,74 @@ def construir_red(arq, n_feats=N_FEATS, L=L_DEFECTO, hp=None):
 _CACHE = {}
 
 
+def exportar_npz(net, arq, path):
+    """Exporta los pesos a .npz para inferir SIN torch.
+
+    Por que existe: en Windows Server torch suele fallar al cargar c10.dll
+    (WinError 1114) por falta del runtime de Visual C++ o por un CPU sin AVX2, y son
+    122 MB de dependencia para hacer unas pocas multiplicaciones de matrices. La LSTM
+    de produccion es de 1 capa y 48 unidades: en numpy son 30 lineas y el servidor no
+    necesita torch para nada. torch queda solo en la maquina de entrenamiento.
+
+    Solo se soporta 'lstm'. El transformer es experimental y no se despliega.
+    """
+    if arq != "lstm":
+        return False
+    sd = {k: v.detach().cpu().numpy() for k, v in net.state_dict().items()}
+    try:
+        datos = {
+            "W_ih": sd["rnn.weight_ih_l0"], "W_hh": sd["rnn.weight_hh_l0"],
+            "b_ih": sd["rnn.bias_ih_l0"], "b_hh": sd["rnn.bias_hh_l0"],
+            "fc_w": sd["fc.weight"], "fc_b": sd["fc.bias"],
+        }
+    except KeyError:
+        return False
+    np.savez(path.replace(".pt", "") + ".npz", **datos)
+    return True
+
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def predecir_npz(f, path_npz):
+    """Forward de la LSTM en numpy puro. f = (L, N_FEATS). Devuelve P(sube).
+
+    Orden de compuertas de PyTorch en weight_ih/weight_hh: [i, f, g, o].
+    En eval() el dropout es identidad, por eso no aparece.
+    """
+    d = _CACHE_NPZ.get(path_npz)
+    if d is None:
+        z = np.load(path_npz)
+        d = {k: z[k].astype(np.float64) for k in z.files}
+        _CACHE_NPZ[path_npz] = d
+    W_ih, W_hh, b = d["W_ih"], d["W_hh"], d["b_ih"] + d["b_hh"]
+    hid = W_hh.shape[1]
+    h = np.zeros(hid)
+    c = np.zeros(hid)
+    for x in f:
+        g = W_ih @ x + W_hh @ h + b
+        i_, f_, g_, o_ = g[:hid], g[hid:2 * hid], g[2 * hid:3 * hid], g[3 * hid:]
+        i_ = _sigmoid(i_); f_ = _sigmoid(f_); g_ = np.tanh(g_); o_ = _sigmoid(o_)
+        c = f_ * c + i_ * g_
+        h = o_ * np.tanh(c)
+    return float(_sigmoid(d["fc_w"] @ h + d["fc_b"])[0])
+
+
+_CACHE_NPZ = {}
+
+
 def guardar(net, arq, L, path, hp=None, meta=None):
     """Guarda pesos + la receta para reconstruir la red. Sin 'hp' aqui, un cambio de
     hiperparametros en config.json dejaria modelos viejos imposibles de cargar."""
     import torch
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     torch.save(net.state_dict(), path)
+    npz = exportar_npz(net, arq, path)
     with open(path + ".json", "w", encoding="utf-8") as f:
         json.dump({"arq": arq, "L": L, "n_feats": N_FEATS,
-                   "hp": {**HP_DEFECTO, **(hp or {})}, "meta": meta or {}}, f)
+                   "hp": {**HP_DEFECTO, **(hp or {})}, "npz": npz,
+                   "meta": meta or {}}, f)
 
 
 def cargar(path):
@@ -139,9 +198,21 @@ def cargar(path):
 
 def predecir_p(velas_iq, path):
     """velas_iq = lista de dicts de get_candles, INCLUIDA la vela en formacion.
-    Devuelve P(sube) sobre la ultima vela CERRADA, o None."""
-    import torch
+    Devuelve P(sube) sobre la ultima vela CERRADA, o None.
+
+    Prefiere el .npz (numpy puro): asi el servidor no necesita torch, que en Windows
+    Server falla a menudo al cargar c10.dll. Cae a torch solo si no hay .npz.
+    """
     V = velas_iq_a_filas(velas_iq)[:-1]      # descarta la vela en formacion
+    npz = path.replace(".pt", "") + ".npz"
+    if os.path.isfile(npz):
+        with open(path + ".json", encoding="utf-8") as fh:
+            L = json.load(fh).get("L", L_DEFECTO)
+        f = ventana_features(V, L)
+        if f is None:
+            return None
+        return predecir_npz(f, npz)
+    import torch
     net, L = cargar(path)
     f = ventana_features(V, L)
     if f is None:

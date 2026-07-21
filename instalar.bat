@@ -19,9 +19,26 @@ if errorlevel 1 (
 )
 REM Sin '%' en la linea de Python: en un .bat cmd lo interpreta como variable
 REM y se come el formato ('%d.%d' llegaba a Python como 'd').
-python -c "import sys;assert sys.version_info>=(3,11);print('   Python',sys.version.split()[0])"
+REM Primero MOSTRAR la version encontrada; si solo se afirma, el error no dice
+REM que hay instalado y no se puede diagnosticar nada.
+for /f "delims=" %%v in ('python -c "import sys;print(sys.version.split()[0])"') do set PYVER=%%v
+echo    Python detectado: %PYVER%
+for /f "delims=" %%p in ('python -c "import sys;print(sys.executable)"') do set PYEXE=%%p
+echo    Ejecutable: %PYEXE%
+
+REM Minimo real 3.9: torch y iqoptionapi lo soportan y el codigo no usa nada mas nuevo.
+python -c "import sys;sys.exit(0 if sys.version_info>=(3,9) else 1)"
 if errorlevel 1 (
-    echo [ERROR] Se requiere Python 3.11 o superior.
+    echo.
+    echo [ERROR] Se requiere Python 3.9 o superior; encontrado %PYVER%
+    echo.
+    echo Si tenes otra version instalada, mira cuales hay con:
+    echo    py -0p
+    echo y corre este script con esa version, por ejemplo:
+    echo    py -3.12 -m venv .venv314
+    echo    .venv314\Scripts\python.exe -m pip install -r requirements.txt
+    echo.
+    echo Si no hay ninguna, instala Python desde python.org marcando "Add to PATH".
     pause
     exit /b 1
 )

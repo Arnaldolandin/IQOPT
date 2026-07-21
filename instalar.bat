@@ -44,8 +44,16 @@ if errorlevel 1 (
 )
 
 echo == 2/4  Entorno virtual ==
+REM Si ya existe un .venv en la maquina, instalar en EL en vez de crear un segundo:
+REM tener .venv y .venv314 a la vez hace que se active el que no tiene torch y el
+REM bot loguee "err seq: ModuleNotFoundError" en cada vela sin caerse.
+set VPY=
 if exist ".venv314\Scripts\python.exe" (
+    set VPY=.venv314\Scripts\python.exe
     echo    .venv314 ya existe, se reutiliza
+) else if exist ".venv\Scripts\python.exe" (
+    set VPY=.venv\Scripts\python.exe
+    echo    .venv ya existe, se reutiliza ^(no se crea un segundo entorno^)
 ) else (
     python -m venv .venv314
     if errorlevel 1 (
@@ -53,9 +61,9 @@ if exist ".venv314\Scripts\python.exe" (
         pause
         exit /b 1
     )
+    set VPY=.venv314\Scripts\python.exe
     echo    .venv314 creado
 )
-set VPY=.venv314\Scripts\python.exe
 
 echo == 3/4  Dependencias ^(torch pesa ~200 MB, esto tarda^) ==
 "%VPY%" -m pip install --upgrade pip --quiet

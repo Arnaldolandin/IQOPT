@@ -14,14 +14,29 @@ REM UnicodeEncodeError en consolas cp1252, que es lo habitual en Windows Server.
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 
-set VPY=.venv314\Scripts\python.exe
+REM Detectar el venv: en algunas maquinas se llama .venv y en otras .venv314.
+REM Activar el que no tiene torch da "err seq: ModuleNotFoundError" en cada vela
+REM sin que el bot se caiga, asi que el sintoma no apunta al venv equivocado.
+set VPY=
+if exist ".venv314\Scripts\python.exe" set VPY=.venv314\Scripts\python.exe
+if not defined VPY if exist ".venv\Scripts\python.exe" set VPY=.venv\Scripts\python.exe
 
-if not exist "%VPY%" (
-    echo [ERROR] No existe el entorno virtual .venv314
+if not defined VPY (
+    echo [ERROR] No se encontro ningun entorno virtual ^(.venv314 ni .venv^)
     echo Corre primero: instalar.bat
     pause
     exit /b 1
 )
+
+REM Verificar que el venv elegido tenga torch, no solo que exista.
+"%VPY%" -c "import torch" 2>nul
+if errorlevel 1 (
+    echo [ERROR] El entorno %VPY% no tiene torch instalado.
+    echo Corre: instalar.bat   ^(o^)   "%VPY%" -m pip install -r requirements.txt
+    pause
+    exit /b 1
+)
+echo Entorno: %VPY%
 
 if not exist "config.json" (
     echo [ERROR] Falta config.json ^(tiene las credenciales, no viaja con git^)

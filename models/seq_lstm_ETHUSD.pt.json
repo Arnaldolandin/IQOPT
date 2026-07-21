@@ -1,0 +1,1 @@
+{"arq": "lstm", "L": 64, "n_feats": 7, "hp": {"hidden": 48, "dropout": 0.3, "capas": 2, "heads": 4}, "npz": true, "meta": {"par": "ETHUSD", "H": 2, "val_loss": 0.6892375349998474, "corte": "2026-05-13", "n_train": 30018, "epocas_max": 60, "batch_size": 256, "lr": 0.001}}

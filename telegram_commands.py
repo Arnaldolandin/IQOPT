@@ -105,8 +105,11 @@ class TelegramCommanderSimple:
         hora_chile = (hora_utc + offset) % 24
 
         op = self.cfg.get("operacion", {})
-        _est_txt = (f"SEQ {os.path.basename(op.get('seq_model', '?'))} "
-                    f"(thr {op.get('seq_threshold', 0.54)})")
+        _mp = op.get("modelos_por_par") or {}
+        _up = op.get("umbrales_por_par") or {}
+        _est_txt = "SEQ " + (", ".join(
+            f"{k}@{_up.get(k, op.get('seq_threshold', 0.54))}" for k in _mp)
+            or f"(thr {op.get('seq_threshold', 0.54)})")
         lines = [
             "[STATUS] Bot IQ Option\n",
             f"Modo: {'REAL' if self._es_real() else 'DEMO'}",
@@ -151,11 +154,16 @@ class TelegramCommanderSimple:
         filtro = self.cfg.get("filtro_hora", {})
         horas = filtro.get("horas_por_par", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        thr = op.get("seq_threshold", 0.54)
-        senal = (f"SEQ: modelo secuencial (LSTM/Transformer) sobre las ultimas velas "
-                 f"cerradas, sin indicadores ni primario.\n"
-                 f"Modelo: {op.get('seq_model', '?')}\n"
-                 f"Devuelve P(sube) a 2 velas. CALL si P>={thr}, PUT si P<={1-thr:.2f}.")
+        _mp = op.get("modelos_por_par") or {}
+        _up = op.get("umbrales_por_par") or {}
+        _def = op.get("seq_threshold", 0.54)
+        _lineas = "\n".join(
+            f"  {k}: {os.path.basename(v)} umbral {_up.get(k, _def)}"
+            for k, v in _mp.items()) or f"  (unico) {op.get('seq_model', '?')} @ {_def}"
+        senal = ("SEQ: modelo secuencial (LSTM) sobre las ultimas velas cerradas, "
+                 "sin indicadores ni primario.\n"
+                 "Cada par usa SU modelo y SU umbral:\n" + _lineas +
+                 "\nDevuelve P(sube) a 2 velas. CALL si P>=umbral, PUT si P<=1-umbral.")
         return (
             f"[ESTRATEGIA] {senal}\n"
             f"Velas {tf}m | Expiracion {op['expiry_min']}m | Stake ${op['stake']}\n"
@@ -231,10 +239,13 @@ class TelegramCommanderSimple:
         op = self.cfg["operacion"]
         filtro = self.cfg.get("filtro_hora", {})
         tf = op['timeframe_seg'] // 60 if op['timeframe_seg'] >= 60 else op['timeframe_seg']
-        _est_lines = (f"Estrategia: seq (modelo secuencial)\n"
-                      f"seq_model: {op.get('seq_model', '?')}\n"
-                      f"seq_threshold: {op.get('seq_threshold', 0.54)}\n"
-                      f"solo_par: {op.get('solo_par') or '(todos)'}\n")
+        _mp = op.get("modelos_por_par") or {}
+        _up = op.get("umbrales_por_par") or {}
+        _def = op.get("seq_threshold", 0.54)
+        _est_lines = ("Estrategia: seq (modelo secuencial)\n" + ("".join(
+            f"  {k}: {os.path.basename(v)} @ {_up.get(k, _def)}\n"
+            for k, v in _mp.items()) or f"  (unico) {op.get('seq_model', '?')} @ {_def}\n") +
+            f"solo_par: {op.get('solo_par') or '(todos los que tengan modelo)'}\n")
         return (
             f"[CONFIG]\n"
             f"{_est_lines}"

@@ -277,6 +277,17 @@ def modelo_de(par):
     return None
 
 
+def umbral_de(par):
+    """Umbral del par. Cada modelo tiene su propia escala de confianza: el de BTCUSD
+    llega a P=0.64 y dispara en ~50% de las velas a 0.54, mientras el de EURUSD apenas
+    pasa de 0.52. Un umbral unico obliga a elegir entre inundar un par u apagar el
+    otro. 'umbrales_por_par' manda; si el par no figura, se usa seq_threshold.
+    """
+    op = CFG.get("operacion", {})
+    mapa = op.get("umbrales_por_par") or {}
+    return float(mapa.get(par, op.get("seq_threshold", 0.54)))
+
+
 def predecir_seq(velas, par=None):
     """Estrategia 'seq': modelo secuencial puro, sin primario bbrev/stoch.
     Devuelve (lado, P, info). Regla simetrica sobre P(sube).
@@ -288,7 +299,7 @@ def predecir_seq(velas, par=None):
     path = modelo_de(par) if par else op.get("seq_model", "models/seq_lstm_EURUSD.pt")
     if not path:
         return None, 0.0, f"(sin modelo para {par}; no se opera)"
-    thr = op.get("seq_threshold", 0.54)
+    thr = umbral_de(par)
     try:
         import seq_model
         p = seq_model.predecir_p(velas, path)
@@ -379,8 +390,9 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
 def run(api, activos, dry=False):
     op = CFG["operacion"]
     _mods = op.get("modelos_por_par") or {"(unico)": op.get("seq_model")}
-    log(f"=== Bot SEQ (modelos: {', '.join(f'{k}->{os.path.basename(v)}' for k, v in _mods.items())}"
-        f" | thr {op.get('seq_threshold', 0.54)}) | {len(activos)} activos | "
+    _det = ", ".join(f"{k}->{os.path.basename(v or '?')}@{umbral_de(k)}"
+                     for k, v in _mods.items())
+    log(f"=== Bot SEQ ({_det}) | {len(activos)} activos | "
         f"ATR min {op.get('min_atr', 0)} | {_instrumento(op['expiry_min'])} {op['expiry_min']}m | "
         f"stake ${op['stake']} | max {CFG.get('max_trades', 1)} trades | {'DRY-RUN' if dry else 'OPERANDO'} ===")
 
@@ -494,7 +506,7 @@ def run(api, activos, dry=False):
                 # entrenamiento: si divergen, el bot alimenta al modelo con features
                 # distintas y falla en silencio.
                 lado, score, info_txt = predecir_seq(velas, par)
-                thr = CFG["operacion"].get("seq_threshold", 0.54)
+                thr = umbral_de(par)
                 cumple = lado is not None
                 log(f"  {par:8s} | {info_txt} | " + (
                     ("SENAL " + lado.upper()) if cumple

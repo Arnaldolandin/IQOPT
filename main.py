@@ -546,11 +546,18 @@ def run(api, activos, dry=False):
 
                 try:
                     op_ = CFG["operacion"]
-                    n_velas = 300   # ~5x EMA50 para que converja + margen
+                    # Las 300 velas venian de la estrategia vieja (5x EMA50 para que
+                    # convergiera). El modelo 'seq' solo necesita L + ATR_P + 1 = 79,
+                    # mas la vela en formacion. Bajar menos acorta el tiempo entre el
+                    # cierre de vela y la compra, que es el desfase de ~5s entre el
+                    # precio que el modelo tomo de referencia y el strike real.
+                    import seq_model as _sm
+                    minimo = _sm.L_DEFECTO + _sm.ATR_P + 2
+                    n_velas = max(int(op_.get("n_velas", 100)), minimo)
                     velas = api.get_candles(par, op_["timeframe_seg"], n_velas, time.time())
                 except Exception:
                     continue
-                if not velas or len(velas) < 60:
+                if not velas or len(velas) < minimo:
                     continue
 
                 vela_cerrada = int(velas[-2]["from"])

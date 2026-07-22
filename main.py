@@ -176,20 +176,31 @@ def minutos_al_vencimiento(expiry_min, grilla_min):
 
 
 def expiry_alineado(op):
-    """True si conviene operar AHORA: el horizonte real coincide con el que se entreno.
+    """True si conviene operar AHORA: el horizonte real coincide con el ENTRENADO.
 
-    El modelo predice close[i+2], es decir exactamente expiry_min minutos. Si la
-    opcion va a durar 15 o 24 minutos, se esta prediciendo una cosa y operando otra.
-    Con la grilla de 15 min solo los momentos :05, :20, :35 y :50 dan un horizonte
-    real de 10 minutos; el resto se descarta.
+    Hay DOS numeros distintos y confundirlos costo 9 señales sin ejecutar:
+
+      horizonte_modelo_min : lo que el modelo predice (2 velas de 5m = 10 min). Es lo
+                             que hay que hacer coincidir con la duracion real.
+      expiry_min           : lo que se le PIDE a IQ. IQ asigna la primera marca de la
+                             grilla que este AL MENOS a esa distancia.
+
+    Si se piden 10 min, comprando a las :20:05 faltan 9.92 para la marca de :30 -- por
+    apenas 5 segundos no alcanza el minimo, IQ salta a :45 y la opcion dura 24.9 min.
+    La ventana buena tenia ancho CERO: habia que comprar en el segundo exacto.
+
+    Pidiendo menos (7 min) el margen absorbe la latencia: a las :20:05 los 9.92 minutos
+    hasta :30 superan el minimo de 7, IQ asigna :30 y la duracion real es ~10, que es
+    lo que el modelo predice.
     """
     if not op.get("alinear_expiry", True):
         return True, 0.0
     grilla = float(op.get("expiry_grilla_min", 15))
     tol = float(op.get("expiry_tolerancia_min", 1.5))
-    exp = float(op.get("expiry_min", 10))
-    real = minutos_al_vencimiento(exp, grilla)
-    return abs(real - exp) <= tol, real
+    pedido = float(op.get("expiry_min", 7))
+    objetivo = float(op.get("horizonte_modelo_min", 10))
+    real = minutos_al_vencimiento(pedido, grilla)
+    return abs(real - objetivo) <= tol, real
 
 
 def _mercado_abierto(abiertos, par, expiry):

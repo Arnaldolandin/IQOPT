@@ -71,7 +71,7 @@ def cfg_entrenamiento():
         c = json.load(open("config.json", encoding="utf-8"))
     except Exception:
         c = {}
-    d = {"par": "EURUSD", "arquitectura": "lstm", "ventana_L": S.L_DEFECTO,
+    d = {"pares": ["EURUSD"], "arquitectura": "lstm", "ventana_L": S.L_DEFECTO,
          "horizonte": 2, "epocas": 60, "batch_size": 256, "learning_rate": 1e-3,
          "weight_decay": 1e-2, "paciencia": 8, "test_frac": 0.35, "val_frac": 0.15,
          "seed": 42, "hp": dict(S.HP_DEFECTO)}
@@ -83,7 +83,7 @@ def cfg_entrenamiento():
 def main():
     E = cfg_entrenamiento()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--par", default=E["par"])
+    ap.add_argument("--par", default="", help="uno solo; vacio = todos los de config")
     ap.add_argument("--arq", default=E["arquitectura"], choices=["lstm", "transformer"])
     ap.add_argument("--L", type=int, default=int(E["ventana_L"]))
     ap.add_argument("--test-frac", type=float, default=float(E["test_frac"]))
@@ -91,15 +91,27 @@ def main():
     ap.add_argument("--salida", default="")
     a = ap.parse_args()
 
+    # Sin --par se entrenan TODOS los de config.json -> entrenamiento.pares. Antes era
+    # un unico 'par' por defecto, lo que confundia: parecia que el pipeline solo servia
+    # para ese activo cuando en realidad era solo el valor por omision.
+    pares = [a.par] if a.par else list(E.get("pares", ["EURUSD"]))
+    for i, par in enumerate(pares, 1):
+        print("\n" + "=" * 60, flush=True)
+        print(f"[{i}/{len(pares)}] {par}", flush=True)
+        print("=" * 60, flush=True)
+        entrenar_par(par, a, E)
+
+
+def entrenar_par(par, a, E):
     global H
     H = int(E["horizonte"])
 
     import torch
     import torch.nn as nn
 
-    print(f"[{a.par}] arq={a.arq} L={a.L} H={H} epocas={a.epocas} "
+    print(f"[{par}] arq={a.arq} L={a.L} H={H} epocas={a.epocas} "
           f"bs={E['batch_size']} lr={E['learning_rate']} hp={E['hp']}", flush=True)
-    X, y, t = dataset(a.par, a.L)
+    X, y, t = dataset(par, a.L)
     print(f"muestras {len(X)} | tasa base P(sube) {100*y.mean():.2f}%")
 
     emb = (a.L + H) * 300
@@ -149,11 +161,11 @@ def main():
 
     with torch.no_grad():
         p = torch.sigmoid(net(torch.tensor(X[m_te]))).numpy()
-    metricas(p, y[m_te], t[m_te], f"{a.arq.upper()} {a.par} (val_loss {mejor:.5f})")
+    metricas(p, y[m_te], t[m_te], f"{a.arq.upper()} {par} (val_loss {mejor:.5f})")
 
-    salida = a.salida or f"models/seq_{a.arq}_{a.par}.pt"
+    salida = a.salida or f"models/seq_{a.arq}_{par}.pt"
     S.guardar(net, a.arq, a.L, salida, hp=E["hp"],
-              meta={"par": a.par, "H": H, "val_loss": mejor,
+              meta={"par": par, "H": H, "val_loss": mejor,
                     "corte": f_(corte), "n_train": int(len(Xt)),
                     "epocas_max": a.epocas, "batch_size": int(E["batch_size"]),
                     "lr": float(E["learning_rate"])})

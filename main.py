@@ -155,6 +155,43 @@ def _open_time_ciclo(api):
     return res[0]
 
 
+def minutos_al_vencimiento(expiry_min, grilla_min):
+    """Minutos reales hasta que liquidara la opcion si se compra AHORA.
+
+    Las binarias de IQ no vencen 'expiry_min' despues de la compra: vencen en marcas
+    fijas de reloj (grilla de 15 min: :00, :15, :30, :45). IQ asigna la primera marca
+    que este al menos a expiry_min de distancia. Comprando a las 20:00 con expiry 10
+    la opcion liquida 20:15 -> el horizonte REAL es 15 min, no 10.
+
+    Medido en vivo: dos entradas a las 20:00:01 y 20:05:05 liquidaron AMBAS a las
+    20:15, o sea sobre el mismo tick: no eran dos operaciones sino una con doble
+    stake.
+    """
+    ahora = datetime.now(timezone.utc)
+    m = ahora.minute + ahora.second / 60.0
+    prox = (int(m // grilla_min) + 1) * grilla_min
+    while prox - m < expiry_min:
+        prox += grilla_min
+    return prox - m
+
+
+def expiry_alineado(op):
+    """True si conviene operar AHORA: el horizonte real coincide con el que se entreno.
+
+    El modelo predice close[i+2], es decir exactamente expiry_min minutos. Si la
+    opcion va a durar 15 o 24 minutos, se esta prediciendo una cosa y operando otra.
+    Con la grilla de 15 min solo los momentos :05, :20, :35 y :50 dan un horizonte
+    real de 10 minutos; el resto se descarta.
+    """
+    if not op.get("alinear_expiry", True):
+        return True, 0.0
+    grilla = float(op.get("expiry_grilla_min", 15))
+    tol = float(op.get("expiry_tolerancia_min", 1.5))
+    exp = float(op.get("expiry_min", 10))
+    real = minutos_al_vencimiento(exp, grilla)
+    return abs(real - exp) <= tol, real
+
+
 def _mercado_abierto(abiertos, par, expiry):
     """True si el activo acepta ordenes ahora, segun get_all_open_time().
 
@@ -540,6 +577,13 @@ def run(api, activos, dry=False):
                 with _lock:
                     if clave in _cruces_fallidos:
                         continue
+
+                # Alinear el horizonte real con el que se entreno (ver expiry_alineado).
+                ok_exp, mins = expiry_alineado(CFG["operacion"])
+                if not ok_exp:
+                    log(f"  [EXPIRY] {par} {lado.upper()} descartado: vencimiento a "
+                        f"{mins:.1f} min, el modelo predice a {expiry} min")
+                    continue
 
                 if dry:
                     log(f"[DRY] {par} {lado.upper()} | {info_txt} | payout {p:.0%}")

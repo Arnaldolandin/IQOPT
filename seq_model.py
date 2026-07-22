@@ -11,16 +11,34 @@ import os
 import numpy as np
 
 L_DEFECTO = 64        # velas de contexto
-N_FEATS = 7
+# 7 base + 2 de volumen. Los factores cross-asset (sistemico/residuo) se probaron y
+# NO mejoraron nada (ETHUSD 56.56% -> 56.23%), y en vivo exigirian bajar velas de 27
+# pares de forex por ciclo para EURUSD. Se quitan: el costo no se justifica sin
+# beneficio, y sobre todo main.py no podia alimentarlos, con lo que el modelo habria
+# recibido esas columnas EN CERO -- distinto de lo que vio entrenando, y sin error
+# visible. La guarda de n_feats detecta el numero de features, no que esten pobladas.
+N_FEATS = 9
 ATR_P = 14
+VOL_P = 20            # ventana para normalizar el volumen
 
 
-def ventana_features(V, L=L_DEFECTO):
+def ventana_features(V, L=L_DEFECTO, vol=None, sis=None, res=None):
     """V = lista de [t, o, h, l, c] en orden cronologico; la ULTIMA es la vela de
     decision (ya cerrada). Devuelve array (L, N_FEATS) float32, o None si no alcanza.
 
     Normaliza por ATR local: sin eso la escala depende del nivel del precio y el
     modelo termina aprendiendo el nivel en vez de la forma.
+
+    Extras opcionales, alineados con V (misma longitud):
+      vol : volumen por vela. Aporta la conviccion detras del movimiento, que el precio
+            solo no muestra. Se normaliza contra su propia media movil.
+      sis : retorno sistemico de la familia del activo (ver factores.py).
+      res : retorno idiosincratico (residuo). ESTA es la feature clave: distingue "cayo
+            todo el mercado" (tiende a continuar) de "cayo solo este activo" (tiende a
+            revertir), que hasta ahora el modelo no podia diferenciar.
+
+    Si faltan, se rellenan con ceros para no romper la forma del vector; el modelo
+    entrenado con ellos rendira peor, pero no fallara.
     """
     if len(V) < L + ATR_P + 1:
         return None
@@ -52,8 +70,32 @@ def ventana_features(V, L=L_DEFECTO):
     # seno, las 3 y las 9 dan el mismo valor (sin es simetrico respecto de las 6) y el
     # modelo no puede distinguir la manana de la tarde.
     hora = ((t[sl] // 3600) % 24) / 24.0
+
+    n = len(V)
+    if vol is not None and len(vol) == n:
+        vv = np.asarray(vol, np.float64)
+        # media movil de VOL_P velas terminando en cada vela de la ventana
+        med = np.empty(L)
+        for j, k in enumerate(range(n - L, n)):
+            w = vv[max(0, k - VOL_P + 1):k + 1]
+            med[j] = w.mean() if len(w) else 0.0
+        vol_rel = np.where(med > 0, vv[n - L:] / np.maximum(med, 1e-9) - 1.0, 0.0)
+        vol_log = np.log1p(np.maximum(vv[n - L:], 0)) / 10.0
+    else:
+        vol_rel = np.zeros(L)
+        vol_log = np.zeros(L)
+
+    # sistemico y residuo llegan como retornos relativos: se escalan por la volatilidad
+    # tipica del propio activo para que sean comparables con el resto del vector.
+    esc = max(float(np.std(np.diff(c[-(L + 1):]) / np.maximum(c[-(L + 1):-1], 1e-12))), 1e-9)
+    sis_v = (np.asarray(sis, np.float64)[n - L:] / esc) if (sis is not None and len(sis) == n) else np.zeros(L)
+    res_v = (np.asarray(res, np.float64)[n - L:] / esc) if (res is not None and len(res) == n) else np.zeros(L)
+    sis_v = np.clip(sis_v, -10, 10)
+    res_v = np.clip(res_v, -10, 10)
+
     f = np.stack([ret, (cc - oo) / a, (hh - ca) / a, (cb - ll) / a, (hh - ll) / a,
-                  np.sin(2 * np.pi * hora), np.cos(2 * np.pi * hora)], axis=1)
+                  np.sin(2 * np.pi * hora), np.cos(2 * np.pi * hora),
+                  vol_rel, vol_log], axis=1)
     if not np.isfinite(f).all():
         return None
     return f.astype(np.float32)
@@ -171,6 +213,18 @@ def predecir_npz(f, path_npz):
 _CACHE_NPZ = {}
 
 
+def predecir_npz_ensemble(f, paths):
+    """Promedia las probabilidades de varios modelos (una semilla cada uno).
+
+    No agrega informacion: reduce la VARIANZA del ajuste. Con esta relacion señal-ruido,
+    parte de lo que predice un modelo suelto es el azar de su inicializacion concreta.
+    Devuelve (P promedio, desviacion entre modelos). La desviacion sirve de filtro: si
+    los modelos discrepan mucho en una vela, es que ahi no hay nada que predecir.
+    """
+    ps = [predecir_npz(f, p) for p in paths]
+    return float(np.mean(ps)), float(np.std(ps))
+
+
 def guardar(net, arq, L, path, hp=None, meta=None):
     """Guarda pesos + la receta para reconstruir la red. Sin 'hp' aqui, un cambio de
     hiperparametros en config.json dejaria modelos viejos imposibles de cargar."""
@@ -199,37 +253,53 @@ def cargar(path):
     return _CACHE[path]
 
 
-def predecir_p(velas_iq, path):
+_ULTIMA_DISPERSION = [0.0]
+
+
+def predecir_p(velas_iq, path, extras=None):
     """velas_iq = lista de dicts de get_candles, INCLUIDA la vela en formacion.
     Devuelve P(sube) sobre la ultima vela CERRADA, o None.
 
-    Prefiere el .npz (numpy puro): asi el servidor no necesita torch, que en Windows
-    Server falla a menudo al cargar c10.dll. Cae a torch solo si no hay .npz.
+    extras = dict opcional {vol, sis, res} alineado con las velas (sin la ultima).
+
+    Orden de preferencia:
+      1) ENSEMBLE de .npz por semilla (base_s1.npz, base_s2.npz, ...) si existen.
+      2) .npz unico: numpy puro, sin torch. Asi el servidor no necesita torch, que en
+         Windows Server falla al cargar c10.dll.
+      3) torch, solo si no hay ningun .npz.
     """
     V = velas_iq_a_filas(velas_iq)[:-1]      # descarta la vela en formacion
-    npz = path.replace(".pt", "") + ".npz"
-    if os.path.isfile(npz):
-        with open(path + ".json", encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        L = cfg.get("L", L_DEFECTO)
-        # Guarda contra el fallo silencioso: si el modelo se entreno con otro numero
-        # de features que el que produce ventana_features(), las matrices no cuadran.
-        # Sin este chequeo el error seria un ValueError de numpy dentro del except de
-        # predecir_seq, que lo mostraria como un "err seq" cualquiera.
-        n_esperado = cfg.get("n_feats", N_FEATS)
-        if n_esperado != N_FEATS:
-            raise RuntimeError(
-                f"modelo entrenado con {n_esperado} features y ventana_features() "
-                f"produce {N_FEATS}. Reentrena con train_seq_save.py")
-        f = ventana_features(V, L)
-        if f is None:
-            return None
-        return predecir_npz(f, npz)
-    import torch
-    net, L = cargar(path)
-    f = ventana_features(V, L)
+    base = path.replace(".pt", "")
+    with open(path + ".json", encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    L = cfg.get("L", L_DEFECTO)
+
+    # Guarda contra el fallo silencioso: si el modelo se entreno con otro numero de
+    # features que el que produce ventana_features(), las matrices no cuadran. Sin este
+    # chequeo el error caeria en el except de predecir_seq como un "err seq" generico.
+    n_esperado = cfg.get("n_feats", N_FEATS)
+    if n_esperado != N_FEATS:
+        raise RuntimeError(
+            f"modelo entrenado con {n_esperado} features y ventana_features() "
+            f"produce {N_FEATS}. Reentrena con train_seq_save.py")
+
+    f = ventana_features(V, L, **(extras or {}))
     if f is None:
         return None
+
+    miembros = [f"{base}_s{k}.npz" for k in range(1, 10)
+                if os.path.isfile(f"{base}_s{k}.npz")]
+    if miembros:
+        pr, disp = predecir_npz_ensemble(f, miembros)
+        _ULTIMA_DISPERSION[0] = disp
+        return pr
+
+    _ULTIMA_DISPERSION[0] = 0.0
+    npz = base + ".npz"
+    if os.path.isfile(npz):
+        return predecir_npz(f, npz)
+
+    import torch
+    net, _ = cargar(path)
     with torch.no_grad():
-        x = torch.tensor(f).unsqueeze(0)
-        return float(torch.sigmoid(net(x)).item())
+        return float(torch.sigmoid(net(torch.tensor(f).unsqueeze(0))).item())

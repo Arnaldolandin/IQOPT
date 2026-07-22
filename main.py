@@ -348,7 +348,12 @@ def predecir_seq(velas, par=None):
     thr = umbral_de(par)
     try:
         import seq_model
-        p = seq_model.predecir_p(velas, path)
+        # El volumen es parte del vector con el que se entreno. Si no se pasa,
+        # ventana_features rellena esas columnas con CERO y el modelo recibe algo
+        # distinto de lo que vio entrenando, devolviendo probabilidades sin sentido
+        # y sin ningun error visible. get_candles ya lo trae en cada vela.
+        vol = [float(v.get("volume", 0) or 0) for v in velas[:-1]]
+        p = seq_model.predecir_p(velas, path, extras={"vol": vol})
     except Exception as e:
         return None, 0.0, f"(err seq: {type(e).__name__}: {str(e)[:40]})"
     if p is None:

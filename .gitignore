@@ -56,3 +56,5 @@ config.json
 secrets.local.json
 models/*.pt
 models/*.pt.json
+cache_ohlc_5m_v2/
+factores_*.npz

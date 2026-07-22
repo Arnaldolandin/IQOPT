@@ -604,8 +604,12 @@ def run(api, activos, dry=False):
                 # Alinear el horizonte real con el que se entreno (ver expiry_alineado).
                 ok_exp, mins = expiry_alineado(CFG["operacion"])
                 if not ok_exp:
-                    log(f"  [EXPIRY] {par} {lado.upper()} descartado: vencimiento a "
-                        f"{mins:.1f} min, el modelo predice a {expiry} min")
+                    # 'expiry' es lo que se le PIDE a IQ (7); el modelo predice a
+                    # horizonte_modelo_min (10). Mostrar el primero hacia parecer que
+                    # el filtro comparaba contra el numero equivocado.
+                    _obj = CFG["operacion"].get("horizonte_modelo_min", 10)
+                    log(f"  [EXPIRY] {par} {lado.upper()} descartado: duracion real "
+                        f"{mins:.1f} min, el modelo predice a {_obj} min")
                     continue
 
                 if dry:

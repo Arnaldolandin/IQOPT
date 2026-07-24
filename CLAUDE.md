@@ -82,13 +82,29 @@ Dos rarezas conocidas del modelo actual:
 ## Como correr
 
 ```powershell
-.venv314\Scripts\python.exe main.py            # DEMO
+.venv314\Scripts\python.exe watchdog.py        # FORMA NORMAL: supervisa main.py en DEMO
+.venv314\Scripts\python.exe main.py            # DEMO a pelo (muere con la consola)
 .venv314\Scripts\python.exe main.py --dry      # solo loguea senales
 .venv314\Scripts\python.exe train_seq_save.py  # reentrena (~1 min por par)
 ```
 
-Usar **`.venv314`** (Python 3.14, con `iqoptionapi` y `torch`).
-Forzar `PYTHONIOENCODING=utf-8` o los logs en espanol petan en consolas heredadas.
+Usar **`.venv314`** (con `iqoptionapi` y `torch`). **El nombre miente: es Python
+3.10.11**, no 3.14. Forzar `PYTHONIOENCODING=utf-8` o los logs en espanol petan en
+consolas heredadas.
+
+**Arrancar siempre por `watchdog.py`, no por `main.py`.** Reinicia el bot si el proceso
+muere o si el *bucle de trading* se congela (heartbeat viejo; el hilo de Telegram sigue
+escribiendo al log aunque el bucle este muerto, asi que el log NO sirve de senal de vida).
+
+Disponibilidad (montado el 2026-07-24, despues de que el PC se reiniciara solo y el bot
+pasara 27 min caido sin que nadie lo viera):
+- Tarea programada de Windows **`IQOPT-watchdog`**, al iniciar sesion. Verla con
+  `Get-ScheduledTask IQOPT-watchdog`; quitarla con `Unregister-ScheduledTask`.
+- `watchdog.py` toma un **cerrojo exclusivo** (`watchdog.lock`). Dos watchdogs serian dos
+  bots comprando la misma senal con el stake al doble: el `_lock` de `main.py` es
+  intra-proceso y no los cruzaria. El segundo se rinde y lo dice en `watchdog.log`.
+- El bot **avisa por Telegram en cada arranque**. Un aviso que no pediste = algo reinicio
+  la maquina.
 
 ## Mecanica de la API de IQ (clave, facil de olvidar)
 
@@ -114,14 +130,26 @@ Forzar `PYTHONIOENCODING=utf-8` o los logs en espanol petan en consolas heredada
 - **`filtro_hora` es lista blanca en UTC.** `horas_por_par[par]` son las horas
   *permitidas*, y un par ausente queda bloqueado 24h. Activarlo con `horas_por_par`
   vacio **apaga el bot en silencio**. `timezone_offset` solo se usa en un log.
+- **`reintento_max_seg: 60`** (era 240). IQ solo acepta ordenes en ventanas de ~3-4 min
+  que abren pasado cada cuarto de hora, y el escaneo del bot esta desalineado con ellas
+  (ver el comentario largo en `main.py`), asi que algo de reintento hace falta: 60s deja
+  que una senal de `:05` alcance la apertura de `:06`. Pero **la senal envejece mientras
+  se reintenta** y el modelo predice a 10 min DESDE la vela de decision. Medido sobre 262
+  operaciones cerradas (2026-07-24, fuera de rollover): inmediatas 60.8% (n=158),
+  demoradas por reintentos 50.0% (n=78). z=1.57 -> indicio, no prueba; el argumento de
+  fondo es que un fill tardio no es la apuesta que el modelo senalo.
+- **BTCUSD fuera de `pares_binarios`** (trampa #5): 86 senales y 0 entradas. Sigue en
+  `entrenamiento.pares`, o sea que se entrena pero no se opera.
 
 ## Git y entorno
 
-- **Dos copias locales**: `D:\GIT\IQOPT` (donde se trabaja y se corre) y `Y:\IQOPT`.
-  Desde 2026-07-21 estan **reconciliadas en el mismo commit**: ambas pueden pushear a
-  `github.com/Arnaldolandin/IQOPT`. Antes tenian historias divergentes.
-- El venv vive en `D:\GIT\IQOPT\.venv314`.
-- `config.json` y `models/*.pt` gitignored. Pendiente: rotar password IQ + token
+- Copia de trabajo: **`D:\Proyects\IQOPT`**, que pushea a
+  `github.com/Arnaldolandin/IQOPT`. (Hasta 2026-07-21 la doc hablaba de `D:\GIT\IQOPT` y
+  `Y:\IQOPT`; **ninguna de las dos existe ya** en esta maquina.)
+- El venv vive en `D:\Proyects\IQOPT\.venv314`.
+- Gitignored: `config.json`, **`models/*` entero** (`.pt`, `.npz`, `.pt.json`),
+  `cache_ohlc_5m*/`, `heartbeat.json`, `estado_velas.json`. Los modelos se regeneran con
+  `train_seq_save.py`; no viajan con `git clone`. Pendiente: rotar password IQ + token
   Telegram (estuvieron en commits viejos).
 
 ## Convenciones

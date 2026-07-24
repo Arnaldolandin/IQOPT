@@ -219,18 +219,42 @@ def _mercado_abierto(abiertos, par, expiry):
     return bool(info["open"])
 
 
+def _llamar_timeout(fn, timeout, default=None):
+    """Ejecuta fn() en un hilo y devuelve (resultado, exito). exito=True SOLO si fn
+    retorno limpio dentro de 'timeout' seg; False si se colgo (timeout) O lanzo excepcion.
+
+    La API de iqoptionapi puede BLOQUEAR indefinidamente cuando el WebSocket muere (no
+    tiene timeout interno, no lanza excepcion, solo espera): sin esto una llamada colgada
+    congela el bucle principal PARA SIEMPRE. Paso el 2026-07-24: WS caido ('Connection is
+    already closed') -> get_candles colgado -> bot frozen 6.5 h sin operar, solo el hilo
+    de Telegram girando. El worker queda como daemon: si de verdad esta colgado, no
+    bloquea el cierre del proceso."""
+    caja = {}
+    def _run():
+        try:
+            caja["r"] = fn()
+        except Exception:
+            caja["e"] = True
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive() or "e" in caja:
+        return default, False
+    return caja.get("r", default), True
+
+
 def verificar_conexion(api):
     global _conectado, _ultima_ping
     ahora = time.time()
     if ahora - _ultima_ping < 30:
         return True
     _ultima_ping = ahora
-    try:
-        api.get_balance()
+    # get_balance CON timeout: si el WS murio, la llamada cuelga y sin esto
+    # verificar_conexion nunca retornaria -> el bot no detectaria la caida.
+    _, exito = _llamar_timeout(api.get_balance, 15)
+    if exito:
         _conectado = True
         return True
-    except Exception:
-        pass
     if _conectado:
         log("[RECONNECT] WebSocket caido, reconectando...")
         _conectado = False
@@ -397,32 +421,80 @@ def _parse_result(res, stake, payout):
 
 
 def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
-    # El contador (sumar_trade) ya fue incrementado por el hilo principal
-    # ANTES de lanzar este thread, para que hay_capacidad() no se pase de max_trades.
+    # El cupo de max_trades se toma AQUI, cuando la orden entra, no al lanzar el hilo:
+    # esperar no es operar. 'cupo' recuerda si llegamos a tomarlo, para no soltar en el
+    # finally un hueco que nunca ocupamos.
+    cupo = False
     try:
-        # Reintenta el buy hasta 3 veces (fallos por timing/'buy late' suelen entrar
-        # en el 2do intento cuando el periodo rota). Captura el motivo real.
+        # REINTENTO SOSTENIDO. Medido el 2026-07-22: IQ no acepta ordenes de forma
+        # continua, sino en VENTANAS de ~3-4 min que abren unos 6-7 min pasado cada
+        # cuarto de hora (:06-:10, :21-:25, :36-:40, :51-:55). Cinco aperturas seguidas
+        # lo confirmaron, dos de ellas predichas de antemano.
+        #
+        # El bot actua al cerrar cada vela de 5m, o sea en +0:05, +5:05 y +10:05 desde
+        # la marca del cuarto: NINGUNO cae dentro de la ventana. Por eso fallaba casi
+        # todas las compras -- no por el activo ni por el expiry, sino porque sus
+        # horarios de escaneo estan desalineados con los del broker por construccion.
+        #
+        # Antes se rendia en ~2 s y, peor aun, 'not available' cortaba el bucle sin
+        # reintentar: justo el mensaje que da una ventana cerrada, el unico caso en que
+        # el reintento SI sirve. Ahora se insiste hasta 'reintento_max_seg'.
+        #
+        # OJO: la senal envejece mientras se reintenta. El modelo predice a 10 min DESDE
+        # EL CIERRE DE VELA; entrar 6 min tarde es una apuesta distinta de la calculada.
+        op_ = CFG.get("operacion", {})
+        max_seg = float(op_.get("reintento_max_seg", 240))
+        pausa = float(op_.get("reintento_pausa_seg", 10))
+        # 'suspended' = el producto no existe para este activo (BTCUSD): no se reintenta
+        PERMANENTES = ("suspended", "not enough money", "balance")
+
         ok, oid, motivo = False, None, ""
-        for intento in range(3):
+        t_ini = time.time()
+        intentos = 0
+        ultimo_log = 0.0
+        while True:
+            intentos += 1
+            # el tope de posiciones se comprueba justo antes de comprar: si esta lleno,
+            # se sigue esperando en vez de abrir la 11a
+            if not hay_capacidad():
+                if time.time() - t_ini + pausa > max_seg:
+                    motivo = f"max_trades lleno durante toda la espera"
+                    break
+                time.sleep(pausa)
+                continue
             try:
                 ok, oid = api.buy(stake, f"{par}-op", lado, expiry)
             except Exception as e:
                 ok, oid = False, f"excepcion: {str(e)[:60]}"
             if ok:
+                sumar_trade()
+                cupo = True
+                registrar_apertura()
+                with _lock:
+                    _activos_ref["abiertos"] = _trades_abiertos
                 break
             motivo = str(oid)[:80] if oid else "buy rechazado (timing/'buy late')"
-            # 'not available' = mercado cerrado (fin de semana/off-hours): NO reintentar,
-            # el retry no ayuda. Solo reintentar fallos transitorios (timing/'buy late').
-            if "not available" in motivo.lower() or "no disponible" in motivo.lower():
+            bajo = motivo.lower()
+            if any(p in bajo for p in PERMANENTES):
                 break
-            if intento < 2:
-                log(f"[RETRY {intento+1}/3] {par} {lado.upper()}: {motivo}")
-                time.sleep(1.0)
+            transcurrido = time.time() - t_ini
+            if transcurrido + pausa > max_seg:
+                break
+            # un log cada 60 s, no en cada intento: si no, inunda rsi_iq.log
+            if transcurrido - ultimo_log >= 60:
+                log(f"[ESPERA] {par} {lado.upper()}: {motivo} "
+                    f"({intentos} intentos, {transcurrido:.0f}s de {max_seg:.0f})")
+                ultimo_log = transcurrido
+            time.sleep(pausa)
         if not ok:
-            log(f"[SKIP] {par} {lado.upper()}: {motivo}")
+            log(f"[SKIP] {par} {lado.upper()} tras {intentos} intentos en "
+                f"{time.time()-t_ini:.0f}s: {motivo}")
             with _lock:
                 _cruces_fallidos.add(f"{par}-{vela_id}")
             return
+        if intentos > 1:
+            log(f"[ENTRO TRAS ESPERAR] {par} {lado.upper()}: {intentos} intentos, "
+                f"{time.time()-t_ini:.0f}s")
         log(f"[ENTRADA] {par} {lado.upper()} | payout {payout:.0%} | id={oid} | "
             f"exp {expiry}m | {info_txt}")
 
@@ -444,9 +516,55 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
     except Exception as e:
         log(f"[ERROR] {par}: {type(e).__name__}: {str(e)[:60]}")
     finally:
-        restar_trade()
+        # solo se devuelve el cupo si de verdad se tomo: los hilos que se rindieron
+        # esperando nunca lo ocuparon, y restarlo aqui dejaria el contador en negativo
+        if cupo:
+            restar_trade()
         with _lock:
             _activos_ref["abiertos"] = _trades_abiertos
+
+
+ESTADO_VELAS = "estado_velas.json"
+
+
+def cargar_ultimas_velas():
+    """Ultima vela ya procesada por activo, PERSISTIDA entre arranques.
+
+    Vivia solo en memoria, y eso duplicaba operaciones: al reiniciar, el diccionario
+    arrancaba vacio, el bot veia la ultima vela cerrada como nueva y repetia una señal
+    que ya habia comprado. El 2026-07-22, con el vigilante reiniciando cada 3-5 min para
+    incorporar modelos, eso convirtio 3 señales en 7 posiciones en veinte minutos --
+    EURJPY llego a comprarse tres veces sobre la misma vela, triple stake sobre una
+    unica prediccion.
+    """
+    try:
+        with open(ESTADO_VELAS, encoding="utf-8") as f:
+            return {k: int(v) for k, v in json.load(f).items()}
+    except Exception:
+        return {}
+
+
+HEARTBEAT = "heartbeat.json"
+
+
+def _escribir_heartbeat():
+    """Escribe el timestamp del ultimo ciclo del bucle de trading. Lo lee watchdog.py.
+    Nunca debe tumbar el bot: si falla el disco, se ignora."""
+    try:
+        with open(HEARTBEAT, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time()}, f)
+    except Exception:
+        pass
+
+
+def guardar_ultimas_velas(d):
+    # Nunca debe tumbar el ciclo de operativa: si falla el disco, se sigue operando y
+    # como mucho se reprocesa una vela tras el proximo reinicio.
+    try:
+        with open(ESTADO_VELAS, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
 
 
 def run(api, activos, dry=False):
@@ -466,12 +584,20 @@ def run(api, activos, dry=False):
     else:
         log("Filtro de hora DESACTIVADO - opera 24/7 en todos los pares")
 
-    ultimas_velas = {}
+    ultimas_velas = cargar_ultimas_velas()
+    if ultimas_velas:
+        log(f"[ESTADO] {len(ultimas_velas)} activos con vela ya procesada: no se "
+            f"repetiran sus señales tras este reinicio")
     _ultima_limpieza = time.time()
     _ultimo_reload = time.time()
 
     while True:
         try:
+            # Latido del BUCLE DE TRADING (no del proceso): el watchdog lo vigila. Si el
+            # bucle se congela (p.ej. una llamada de API colgada), el heartbeat envejece
+            # aunque el hilo de Telegram siga vivo -> el watchdog reinicia. Detecta el
+            # fallo del 2026-07-24, que el mtime del log NO detectaba (Telegram lo movia).
+            _escribir_heartbeat()
             if CFG.get("riesgo", {}).get("pausado"):
                 log("[PAUSADO] Bot pausado via Telegram. Esperando...")
                 time.sleep(10)
@@ -508,9 +634,10 @@ def run(api, activos, dry=False):
                 continue
 
             # Una sola consulta de payouts por ciclo (evita 231 llamadas/ciclo).
-            try:
-                profits_ciclo = api.get_all_profit()
-            except Exception:
+            # CON timeout: si el WS murio esta llamada colgaria el bucle (ver
+            # _llamar_timeout). Si falla, {} y seguimos: el buy decidira disponibilidad.
+            profits_ciclo, _ = _llamar_timeout(api.get_all_profit, 15, {})
+            if profits_ciclo is None:
                 profits_ciclo = {}
 
             # Idem para el horario del mercado. OJO: el payout NO sirve de proxy, IQ
@@ -554,16 +681,26 @@ def run(api, activos, dry=False):
                     import seq_model as _sm
                     minimo = _sm.L_DEFECTO + _sm.ATR_P + 2
                     n_velas = max(int(op_.get("n_velas", 100)), minimo)
-                    velas = api.get_candles(par, op_["timeframe_seg"], n_velas, time.time())
+                    # CON timeout: get_candles es la llamada que colgó el bot el
+                    # 2026-07-24 cuando el WS murio. Si se cuelga o falla -> exito=False
+                    # -> saltamos este par; verificar_conexion detectara la caida y
+                    # reconectara en el proximo ciclo.
+                    velas, exito = _llamar_timeout(
+                        lambda: api.get_candles(par, op_["timeframe_seg"], n_velas, time.time()), 20)
+                    if not exito:
+                        continue
                 except Exception:
                     continue
                 if not velas or len(velas) < minimo:
                     continue
 
                 vela_cerrada = int(velas[-2]["from"])
-                if ultimas_velas.get(par) == vela_cerrada:
+                # '>=' y no '==': si por lo que sea la vela guardada fuese posterior,
+                # con '==' se reprocesaria igualmente. Asi solo pasan las de verdad nuevas.
+                if ultimas_velas.get(par, 0) >= vela_cerrada:
                     continue
                 ultimas_velas[par] = vela_cerrada
+                guardar_ultimas_velas(ultimas_velas)
 
                 closes = [float(v["close"]) for v in velas[:-1]]
                 highs = [float(v.get("max", v.get("high", v["close"]))) for v in velas[:-1]]
@@ -621,12 +758,11 @@ def run(api, activos, dry=False):
                     log(f"[RIESGO] {max_ops} ops/hora alcanzadas. Esperando...")
                     break
 
-                # Reservar cupo ANTES de lanzar el hilo para no pasarse de max_trades.
-                sumar_trade()
-                registrar_apertura()
-                with _lock:
-                    _activos_ref["abiertos"] = _trades_abiertos
-
+                # El cupo de max_trades lo toma ejecutar_trade cuando la orden ENTRA de
+                # verdad, no aqui. Con el reintento sostenido, un hilo puede pasarse
+                # minutos esperando a que abra la ventana del broker; si reservara el
+                # cupo al arrancar, diez hilos en espera dejaban el bot en [LLENO] sin
+                # una sola posicion abierta -- que es justo lo que paso al estrenarlo.
                 t = threading.Thread(
                     target=ejecutar_trade,
                     args=(api, par, lado, p, stake, expiry, vela_cerrada, info_txt),
@@ -666,7 +802,17 @@ def main():
 
     api = IQ_Option(CFG["email"], CFG["password"])
     log("Conectando a IQ Option...")
-    ok, reason = api.connect()
+    # connect() puede REVENTAR en vez de devolver (False, motivo): stable_api.py hace
+    # json.loads(reason) dando por hecho que el motivo es JSON, y cuando el fallo es de
+    # red el motivo es el string 'Websocket connection closed.' -> JSONDecodeError.
+    # Sin este try la traza se va por stderr y rsi_iq.log se queda en la linea de
+    # arriba: el 2026-07-22 hubo nueve arranques que no dejaron ni una pista del motivo.
+    try:
+        ok, reason = api.connect()
+    except Exception as e:
+        ok, reason = False, f"{type(e).__name__}: {str(e)[:120]}"
+        if isinstance(e, json.JSONDecodeError):
+            reason += " (login KO; el motivo real no era JSON, mirar red/IQ caido)"
     if not ok:
         log(f"NO CONECTO: {reason}")
         return

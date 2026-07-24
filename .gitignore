@@ -18,15 +18,6 @@ rsi_iq.log
 bot_demo*.log
 mejora_out.txt
 
-# Caches de datos OHLC (grandes; se regeneran con los descargadores)
-cache_ohlc/
-cache_ohlc_1m/
-cache_ohlc_5m/
-cache_ohlc_30m/
-cache_closes/
-cache_feats/
-cache_feats_directo/
-
 # Salidas regenerables de los backtests (grandes; se rehacen con los scripts)
 bt_horas_senales.json
 bt_probe.json
@@ -51,10 +42,10 @@ Thumbs.db
 .claude/settings.local.json
 
 # Credenciales (NUNCA subir): email/password de IQ en texto plano
-config.json
 .env
 secrets.local.json
-models/*.pt
-models/*.pt.json
-cache_ohlc_5m_v2/
-factores_*.npz
+config.json
+
+# Runtime del watchdog / bot
+heartbeat.json
+bot_stdout.log

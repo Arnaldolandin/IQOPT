@@ -100,6 +100,14 @@ Disponibilidad (montado el 2026-07-24, despues de que el PC se reiniciara solo y
 pasara 27 min caido sin que nadie lo viera):
 - Tarea programada de Windows **`IQOPT-watchdog`**, al iniciar sesion. Verla con
   `Get-ScheduledTask IQOPT-watchdog`; quitarla con `Unregister-ScheduledTask`.
+- **Todo corre bajo `pythonw.exe`, y eso NO es cosmetico.** El mismo dia, ya con
+  watchdog, el bot volvio a caer sin reinicio del PC: `LastTaskResult` de la tarea era
+  `3221225786` = `0xC000013A` = **STATUS_CONTROL_C_EXIT**, o sea un evento de consola de
+  un proceso vecino. `DETACHED_PROCESS` solo no bastaba: el `python.exe` del venv es un
+  **stub que relanza el interprete base como hijo**, y ese hijo se abria consola propia.
+  `pythonw.exe` es del subsistema GUI y no asigna consola nunca. Comprobacion: los 4
+  procesos de la cadena deben dar `MainWindowHandle = 0`. Cuidado si se vuelve a
+  `python.exe`: sin stdout redirigido, `sys.stdout` es `None` y `print()` peta.
 - `watchdog.py` toma un **cerrojo exclusivo** (`watchdog.lock`). Dos watchdogs serian dos
   bots comprando la misma senal con el stake al doble: el `_lock` de `main.py` es
   intra-proceso y no los cruzaria. El segundo se rinde y lo dice en `watchdog.log`.

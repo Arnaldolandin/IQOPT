@@ -866,6 +866,21 @@ def main():
         t.start()
         log("Telegram bot iniciado.")
 
+        # Aviso de ARRANQUE. No es cosmetico: el 2026-07-24 el PC se reinicio solo y el
+        # bot estuvo 27 min caido sin que nadie lo notara. Un mensaje por cada arranque
+        # hace visible el reinicio que no pediste -- si llega uno a deshora, algo paso.
+        modo = "DRY (sin operar)" if args.dry else ("REAL" if args.real else "DEMO")
+        try:
+            commander._enviar(
+                tg_cfg["chat_id"],
+                f"Bot IQOPT iniciado\nModo: {modo}\n"
+                f"Balance: {_sesion.get('balance_inicial')}\n"
+                f"Activos: {len(activos)}\n"
+                f"Hora: {datetime.now():%Y-%m-%d %H:%M:%S}",
+                tg_cfg["token"])
+        except Exception as e:
+            log(f"[TELEGRAM] no se pudo avisar del arranque: {type(e).__name__}")
+
     run(api, activos, dry=args.dry)
 
 

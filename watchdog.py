@@ -16,7 +16,14 @@ import sys
 import time
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
-PY = os.path.join(AQUI, ".venv314", "Scripts", "python.exe")
+# pythonw.exe (subsistema GUI) NUNCA asigna consola, y sin consola no hay eventos de
+# consola que maten al bot. Con python.exe no basta: el 'python.exe' del venv es un stub
+# que relanza el interprete base como HIJO, y ese hijo se abria su propia consola aunque
+# el stub saliera con DETACHED_PROCESS. stdout se redirige a bot_stdout.log, asi que
+# print() sigue funcionando (con pythonw sin redirigir, sys.stdout seria None y petaria).
+PY = os.path.join(AQUI, ".venv314", "Scripts", "pythonw.exe")
+if not os.path.exists(PY):
+    PY = os.path.join(AQUI, ".venv314", "Scripts", "python.exe")
 HEARTBEAT = os.path.join(AQUI, "heartbeat.json")
 LOG = os.path.join(AQUI, "watchdog.log")
 BOT_OUT = os.path.join(AQUI, "bot_stdout.log")
@@ -55,8 +62,14 @@ def lanzar(flags):
         pass
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     out = open(BOT_OUT, "a", encoding="utf-8")
+    # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP: el bot NO comparte consola con nadie.
+    # El 2026-07-24 a las 12:36 el watchdog murio con LastTaskResult 0xC000013A
+    # (STATUS_CONTROL_C_EXIT): le llego un evento de consola de un proceso vecino y se
+    # llevo al bot por delante. Un supervisor que comparte consola no supervisa nada.
+    # stdout va a un archivo, asi que la consola no hace falta para nada.
     p = subprocess.Popen([PY, "main.py"] + flags, cwd=AQUI,
-                         stdout=out, stderr=subprocess.STDOUT, env=env)
+                         stdout=out, stderr=subprocess.STDOUT, env=env,
+                         creationflags=0x00000008 | 0x00000200)
     log(f"Bot lanzado (PID {p.pid}) main.py {' '.join(flags)}")
     return p
 

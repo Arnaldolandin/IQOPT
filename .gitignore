@@ -49,3 +49,15 @@ config.json
 # Runtime del watchdog / bot
 heartbeat.json
 bot_stdout.log
+estado_velas.json
+
+# Modelos entrenados: binarios grandes y regenerables con train_seq_save.py.
+# No viajan con git clone (ver CLAUDE.md); cada maquina reentrena o los copia a mano.
+models/*.pt
+models/*.npz
+models/*.pt.json
+
+# Cache de velas y factores derivados (se regeneran con download_ohlc_5m*.py)
+cache_ohlc_5m/
+cache_ohlc_5m_v2/
+factores_*.npz

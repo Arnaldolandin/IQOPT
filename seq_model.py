@@ -134,6 +134,24 @@ def construir_red(arq, n_feats=N_FEATS, L=L_DEFECTO, hp=None):
             o, _ = self.rnn(x)
             return self.fc(self.do(o[:, -1])).squeeze(-1)
 
+    class BiLSTM(nn.Module):
+        """LSTM bidireccional de 'capas' capas: lee la ventana (64 velas PASADAS) hacia
+        delante y hacia atras. No filtra futuro -- la ventana entera es historia cerrada.
+        Con >1 capa, PyTorch aplica dropout ENTRE capas. Usa el hidden FINAL de la ULTIMA
+        capa en ambas direcciones (contexto completo), no o[:,-1]."""
+        def __init__(self, f):
+            super().__init__()
+            nl = max(1, int(h["capas"]))
+            self.rnn = nn.LSTM(f, h["hidden"], num_layers=nl, batch_first=True,
+                               bidirectional=True, dropout=(h["dropout"] if nl > 1 else 0.0))
+            self.do = nn.Dropout(h["dropout"])
+            self.fc = nn.Linear(2 * h["hidden"], 1)
+
+        def forward(self, x):
+            _, (hn, _cn) = self.rnn(x)          # hn: (nl*2, batch, hidden)
+            hcat = torch.cat([hn[-2], hn[-1]], dim=1)   # ultima capa: [fwd_final, bwd_final]
+            return self.fc(self.do(hcat)).squeeze(-1)
+
     class Trafo(nn.Module):
         def __init__(self, f):
             super().__init__()
@@ -149,7 +167,11 @@ def construir_red(arq, n_feats=N_FEATS, L=L_DEFECTO, hp=None):
             z = self.enc(self.inp(x) + self.pos)
             return self.fc(z.mean(1)).squeeze(-1)
 
-    return LSTM(n_feats) if arq == "lstm" else Trafo(n_feats)
+    if arq == "lstm":
+        return LSTM(n_feats)
+    if arq == "bilstm":
+        return BiLSTM(n_feats)
+    return Trafo(n_feats)
 
 
 # ---------------------------------------------------------------- persistencia
@@ -165,17 +187,29 @@ def exportar_npz(net, arq, path):
     de produccion es de 1 capa y 48 unidades: en numpy son 30 lineas y el servidor no
     necesita torch para nada. torch queda solo en la maquina de entrenamiento.
 
-    Solo se soporta 'lstm'. El transformer es experimental y no se despliega.
+    Se soportan 'lstm' y 'bilstm'. El transformer es experimental y no se despliega.
     """
-    if arq != "lstm":
+    if arq not in ("lstm", "bilstm"):
         return False
     sd = {k: v.detach().cpu().numpy() for k, v in net.state_dict().items()}
     try:
-        datos = {
-            "W_ih": sd["rnn.weight_ih_l0"], "W_hh": sd["rnn.weight_hh_l0"],
-            "b_ih": sd["rnn.bias_ih_l0"], "b_hh": sd["rnn.bias_hh_l0"],
-            "fc_w": sd["fc.weight"], "fc_b": sd["fc.bias"],
-        }
+        datos = {"fc_w": sd["fc.weight"], "fc_b": sd["fc.bias"]}
+        # numero de capas y direcciones desde el propio state_dict
+        nl = 0
+        while f"rnn.weight_ih_l{nl}" in sd:
+            nl += 1
+        bidir = "rnn.weight_ih_l0_reverse" in sd
+        for n in range(nl):
+            suf = "" if n == 0 else f"_l{n}"     # capa 0 con nombres LEGACY (retrocompat)
+            datos[f"W_ih{suf}"] = sd[f"rnn.weight_ih_l{n}"]
+            datos[f"W_hh{suf}"] = sd[f"rnn.weight_hh_l{n}"]
+            datos[f"b_ih{suf}"] = sd[f"rnn.bias_ih_l{n}"]
+            datos[f"b_hh{suf}"] = sd[f"rnn.bias_hh_l{n}"]
+            if bidir:
+                datos[f"W_ih{suf}_r"] = sd[f"rnn.weight_ih_l{n}_reverse"]
+                datos[f"W_hh{suf}_r"] = sd[f"rnn.weight_hh_l{n}_reverse"]
+                datos[f"b_ih{suf}_r"] = sd[f"rnn.bias_ih_l{n}_reverse"]
+                datos[f"b_hh{suf}_r"] = sd[f"rnn.bias_hh_l{n}_reverse"]
     except KeyError:
         return False
     np.savez(path.replace(".pt", "") + ".npz", **datos)
@@ -186,27 +220,52 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def predecir_npz(f, path_npz):
-    """Forward de la LSTM en numpy puro. f = (L, N_FEATS). Devuelve P(sube).
+def _lstm_run(seq, W_ih, W_hh, b):
+    """Corre una LSTM de 1 capa sobre 'seq' (T, feats). Devuelve (outputs (T, hid),
+    hidden final). Orden de compuertas de PyTorch en weight_ih/weight_hh: [i, f, g, o]."""
+    hid = W_hh.shape[1]
+    h = np.zeros(hid); c = np.zeros(hid)
+    outs = np.empty((len(seq), hid))
+    for t in range(len(seq)):
+        g = W_ih @ seq[t] + W_hh @ h + b
+        i_, f_, g_, o_ = g[:hid], g[hid:2 * hid], g[2 * hid:3 * hid], g[3 * hid:]
+        i_ = _sigmoid(i_); f_ = _sigmoid(f_); g_ = np.tanh(g_); o_ = _sigmoid(o_)
+        c = f_ * c + i_ * g_
+        h = o_ * np.tanh(c)
+        outs[t] = h
+    return outs, h
 
-    Orden de compuertas de PyTorch en weight_ih/weight_hh: [i, f, g, o].
-    En eval() el dropout es identidad, por eso no aparece.
-    """
+
+def predecir_npz(f, path_npz):
+    """Forward en numpy puro de la LSTM / BiLSTM exportada (N capas). f = (L, N_FEATS).
+    Devuelve P(sube). En eval() el dropout es identidad, por eso no aparece.
+
+    General y retrocompatible: capa 0 con nombres legacy (W_ih...), capas >0 indexadas
+    (W_ih_l1...). Bidireccional si hay pesos '_r'. Entre capas, la entrada de la siguiente
+    es la salida concatenada [forward, backward] de la actual (como en PyTorch)."""
     d = _CACHE_NPZ.get(path_npz)
     if d is None:
         z = np.load(path_npz)
         d = {k: z[k].astype(np.float64) for k in z.files}
         _CACHE_NPZ[path_npz] = d
-    W_ih, W_hh, b = d["W_ih"], d["W_hh"], d["b_ih"] + d["b_hh"]
-    hid = W_hh.shape[1]
-    h = np.zeros(hid)
-    c = np.zeros(hid)
-    for x in f:
-        g = W_ih @ x + W_hh @ h + b
-        i_, f_, g_, o_ = g[:hid], g[hid:2 * hid], g[2 * hid:3 * hid], g[3 * hid:]
-        i_ = _sigmoid(i_); f_ = _sigmoid(f_); g_ = np.tanh(g_); o_ = _sigmoid(o_)
-        c = f_ * c + i_ * g_
-        h = o_ * np.tanh(c)
+    nl = 1
+    while f"W_ih_l{nl}" in d:
+        nl += 1
+    seq = np.asarray(f, np.float64)
+    last_hf = last_hb = None
+    for n in range(nl):
+        suf = "" if n == 0 else f"_l{n}"
+        outs_f, hf = _lstm_run(seq, d[f"W_ih{suf}"], d[f"W_hh{suf}"],
+                               d[f"b_ih{suf}"] + d[f"b_hh{suf}"])
+        if f"W_ih{suf}_r" in d:
+            outs_br, hb = _lstm_run(seq[::-1], d[f"W_ih{suf}_r"], d[f"W_hh{suf}_r"],
+                                    d[f"b_ih{suf}_r"] + d[f"b_hh{suf}_r"])
+            outs_b = outs_br[::-1]                       # volver al orden temporal
+            seq = np.concatenate([outs_f, outs_b], axis=1)
+            last_hf, last_hb = hf, hb
+        else:
+            seq = outs_f; last_hf, last_hb = hf, None
+    h = np.concatenate([last_hf, last_hb]) if last_hb is not None else last_hf
     return float(_sigmoid(d["fc_w"] @ h + d["fc_b"])[0])
 
 

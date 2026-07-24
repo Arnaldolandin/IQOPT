@@ -214,7 +214,7 @@ def main():
     E = cfg_entrenamiento()
     ap = argparse.ArgumentParser()
     ap.add_argument("--par", default="", help="uno solo; vacio = todos los de config")
-    ap.add_argument("--arq", default=E["arquitectura"], choices=["lstm", "transformer"])
+    ap.add_argument("--arq", default=E["arquitectura"], choices=["lstm", "bilstm", "transformer"])
     ap.add_argument("--L", type=int, default=int(E["ventana_L"]))
     ap.add_argument("--test-frac", type=float, default=float(E["test_frac"]))
     ap.add_argument("--epocas", type=int, default=int(E["epocas"]))

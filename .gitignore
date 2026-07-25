@@ -51,6 +51,7 @@ heartbeat.json
 bot_stdout.log
 estado_velas.json
 watchdog.lock
+bot.lock
 
 # Modelos entrenados: binarios grandes y regenerables con train_seq_save.py.
 # No viajan con git clone (ver CLAUDE.md); cada maquina reentrena o los copia a mano.

@@ -362,3 +362,56 @@ def predecir_p(velas_iq, path, extras=None):
     net, _ = cargar(path)
     with torch.no_grad():
         return float(torch.sigmoid(net(torch.tensor(f).unsqueeze(0))).item())
+
+
+# ---------------------------------------------------------------- cerrojo de instancia
+# Un unico proceso por rol (un watchdog, un bot). Dos bots operando a la vez = ordenes
+# DUPLICADAS sobre la misma senal con el stake al doble, y ninguno lo ve porque el _lock
+# de main.py no cruza procesos. El 2026-07-24 pasó: convivieron dos watchdogs y arranco
+# un segundo bot por fuera del watchdog.
+#
+# El intento anterior (cerrojo solo en el watchdog, archivo abierto en "w") fallaba por
+# DOS motivos: (1) "w" trunca el archivo a 0 bytes en cada apertura, y msvcrt.locking del
+# byte 0 sobre un archivo vacio puede tener EXITO para dos procesos a la vez (el rango
+# cae en/mas alla del EOF); (2) el bot puede lanzarse sin watchdog, y ese cerrojo no lo
+# veia. Aqui se corrige: se garantiza 1 byte real que bloquear y el cerrojo se aplica al
+# BOT ademas del watchdog. El lock es del SO: si el proceso muere (o el PC se apaga) se
+# libera solo, sin PIDs rancios que limpiar.
+_CERROJOS = []  # mantiene los descriptores abiertos mientras viva el proceso
+
+def tomar_cerrojo(path):
+    """Devuelve un descriptor si se obtuvo el cerrojo exclusivo, o None si ya lo tiene
+    otro proceso vivo. En plataformas sin msvcrt/fcntl (no deberia pasar aqui) degrada a
+    'concedido' antes que bloquear el arranque."""
+    try:
+        import msvcrt
+        f = open(path, "a+")            # NO trunca; crea si falta
+        f.seek(0, 2)
+        if f.tell() == 0:
+            f.write("x"); f.flush()     # 1 byte REAL: el rango [0,1) existe de verdad
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            f.close()
+            return None
+    except ImportError:
+        try:
+            import fcntl
+            f = open(path, "a+")
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                f.close()
+                return None
+        except ImportError:
+            return open(path, "a+")     # sin primitivas de lock: no bloquear el arranque
+    # PID informativo a partir del byte 1: NO se toca el byte 0, que es el ancla del lock.
+    # Nada de truncate() aqui: dejaria el archivo en 0 bytes un instante y abriria la
+    # misma carrera que hundio al cerrojo anterior.
+    try:
+        f.seek(1); f.write(f" pid={os.getpid()}\n"); f.flush()
+    except Exception:
+        pass
+    _CERROJOS.append(f)
+    return f

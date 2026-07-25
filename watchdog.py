@@ -85,32 +85,15 @@ def matar(p):
         log(f"Error matando bot: {e}")
 
 
-def tomar_cerrojo():
-    """Instancia unica. Dos watchdogs = dos bots = ordenes DUPLICADAS sobre la misma
-    senal, con el stake al doble y sin que ningun contador lo vea (son procesos
-    distintos, el _lock de main.py no cruza procesos). Desde que hay tarea programada
-    al iniciar sesion el escenario es real: basta con haber lanzado uno a mano antes.
-
-    El cerrojo es un bloqueo de archivo del SO, no un PID guardado: si el proceso muere
-    de golpe (o el PC se apaga, como el 2026-07-24) Windows lo suelta solo. Se devuelve
-    el descriptor para que siga abierto mientras viva el proceso."""
-    import msvcrt
-    f = open(LOCK, "w")
-    try:
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        f.close()
-        return None
-    f.write(f"{os.getpid()}\n")
-    f.flush()
-    return f
-
-
 def main():
     flags = sys.argv[1:]
-    cerrojo = tomar_cerrojo()
-    if cerrojo is None:
-        log("Ya hay OTRO watchdog vivo: no arranco (evita bots duplicados).")
+    # Instancia unica del watchdog. El cerrojo real contra ordenes duplicadas vive en el
+    # BOT (main.py), porque un bot puede lanzarse sin watchdog; este solo evita dos
+    # supervisores relanzando cada uno su bot. Mismo helper robusto (seq_model), no la
+    # version con "w" que fallaba (truncaba el archivo y dejaba pasar dos locks).
+    from seq_model import tomar_cerrojo
+    if tomar_cerrojo(LOCK) is None:
+        log("Ya hay OTRO watchdog vivo (watchdog.lock tomado): no arranco.")
         sys.exit(0)
     log(f"Watchdog iniciado. MAX_SILENCIO={MAX_SILENCIO}s CHECK={CHECK}s GRACIA={GRACIA}s")
     proc = lanzar(flags)

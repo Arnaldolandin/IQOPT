@@ -784,6 +784,19 @@ def main():
     ap.add_argument("--dry", action="store_true", help="No opera, solo loguea senales")
     args = ap.parse_args()
 
+    # INSTANCIA UNICA DEL BOT. Es la defensa de verdad contra ordenes duplicadas: el
+    # 2026-07-24 un segundo main.py arranco por fuera del watchdog (que tiene su propio
+    # cerrojo) y estuvo a punto de operar sobre el mismo log. Dos bots = mismo stake x2
+    # sobre la misma senal, invisible porque _lock no cruza procesos. En --dry no opera,
+    # asi que ahi se permite convivir. El lock es del SO: se libera solo si el proceso
+    # muere o el PC se apaga.
+    if not args.dry:
+        from seq_model import tomar_cerrojo
+        _AQUI = os.path.dirname(os.path.abspath(__file__))
+        if tomar_cerrojo(os.path.join(_AQUI, "bot.lock")) is None:
+            log("YA HAY OTRO BOT vivo (bot.lock tomado): no arranco, evito ordenes duplicadas.")
+            raise SystemExit(0)
+
     _balance_mode = "REAL" if args.real else "PRACTICE"
 
     with open("config.json", encoding="utf-8") as f:

@@ -777,6 +777,21 @@ def run(api, activos, dry=False):
             time.sleep(POLL)
 
 
+def _cargar_env(path):
+    """Carga un .env (KEY=VALUE por linea) al entorno del proceso, sin dependencias.
+    setdefault: una variable YA presente en el entorno real gana sobre el archivo, para
+    poder sobreescribir en despliegue sin editar el fichero. Comillas y # comentario."""
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for linea in f:
+            linea = linea.strip()
+            if not linea or linea.startswith("#") or "=" not in linea:
+                continue
+            k, v = linea.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 def main():
     global CFG, _balance_mode
     ap = argparse.ArgumentParser(description="Bot REVERSION-Bollinger multi-activo MULTI-HILO.")
@@ -799,11 +814,14 @@ def main():
 
     _balance_mode = "REAL" if args.real else "PRACTICE"
 
+    # Cargar .env (credenciales) al entorno ANTES de leerlas. Sin dependencias externas.
+    _cargar_env(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
     with open("config.json", encoding="utf-8") as f:
         CFG = json.load(f)
 
-    # Credenciales: variables de entorno tienen prioridad sobre config.json.
-    # Permite NO guardar secretos en el repo (config.json esta gitignored/untracked).
+    # Credenciales: SIEMPRE via entorno (.env). config.json ya NO las lleva (se trackea en
+    # el repo sin secretos); el 'or CFG.get(...)' queda de fallback por si alguien las deja.
     CFG["email"] = os.getenv("IQ_EMAIL") or CFG.get("email")
     CFG["password"] = os.getenv("IQ_PASSWORD") or CFG.get("password")
     tg = CFG.setdefault("telegram", {})

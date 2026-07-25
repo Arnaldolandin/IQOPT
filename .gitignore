@@ -41,10 +41,11 @@ Thumbs.db
 # Configuración local de Claude Code (permisos por máquina)
 .claude/settings.local.json
 
-# Credenciales (NUNCA subir): email/password de IQ en texto plano
+# Credenciales (NUNCA subir): ahora viven SOLO en .env
 .env
 secrets.local.json
-config.json
+# config.json ya NO lleva secretos (email/password/token vacios, se toman de .env),
+# asi que SI se trackea. Ver _cargar_env() en main.py.
 
 # Runtime del watchdog / bot
 heartbeat.json

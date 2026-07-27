@@ -777,21 +777,6 @@ def run(api, activos, dry=False):
             time.sleep(POLL)
 
 
-def _cargar_env(path):
-    """Carga un .env (KEY=VALUE por linea) al entorno del proceso, sin dependencias.
-    setdefault: una variable YA presente en el entorno real gana sobre el archivo, para
-    poder sobreescribir en despliegue sin editar el fichero. Comillas y # comentario."""
-    if not os.path.isfile(path):
-        return
-    with open(path, encoding="utf-8") as f:
-        for linea in f:
-            linea = linea.strip()
-            if not linea or linea.startswith("#") or "=" not in linea:
-                continue
-            k, v = linea.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-
-
 def main():
     global CFG, _balance_mode
     ap = argparse.ArgumentParser(description="Bot REVERSION-Bollinger multi-activo MULTI-HILO.")
@@ -799,12 +784,9 @@ def main():
     ap.add_argument("--dry", action="store_true", help="No opera, solo loguea senales")
     args = ap.parse_args()
 
-    # INSTANCIA UNICA DEL BOT. Es la defensa de verdad contra ordenes duplicadas: el
-    # 2026-07-24 un segundo main.py arranco por fuera del watchdog (que tiene su propio
-    # cerrojo) y estuvo a punto de operar sobre el mismo log. Dos bots = mismo stake x2
-    # sobre la misma senal, invisible porque _lock no cruza procesos. En --dry no opera,
-    # asi que ahi se permite convivir. El lock es del SO: se libera solo si el proceso
-    # muere o el PC se apaga.
+    # INSTANCIA UNICA DEL BOT: defensa real contra ordenes duplicadas. Un segundo main.py
+    # (lanzado por fuera del watchdog) operaria sobre la misma senal con el stake al doble,
+    # invisible porque _lock no cruza procesos. En --dry no opera, asi que ahi se permite.
     if not args.dry:
         from seq_model import tomar_cerrojo
         _AQUI = os.path.dirname(os.path.abspath(__file__))
@@ -814,21 +796,28 @@ def main():
 
     _balance_mode = "REAL" if args.real else "PRACTICE"
 
-    # Cargar .env (credenciales) al entorno ANTES de leerlas. Sin dependencias externas.
-    _cargar_env(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    # Cargar .env si existe (sin dependencia python-dotenv)
+    _env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.isfile(_env):
+        with open(_env, encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _, _v = _line.partition("=")
+                    os.environ.setdefault(_k.strip(), _v.strip())
 
     with open("config.json", encoding="utf-8") as f:
         CFG = json.load(f)
 
-    # Credenciales: SIEMPRE via entorno (.env). config.json ya NO las lleva (se trackea en
-    # el repo sin secretos); el 'or CFG.get(...)' queda de fallback por si alguien las deja.
-    CFG["email"] = os.getenv("IQ_EMAIL") or CFG.get("email")
-    CFG["password"] = os.getenv("IQ_PASSWORD") or CFG.get("password")
+    # Credenciales: variables de entorno tienen prioridad sobre config.json.
+    # Permite NO guardar secretos en el repo (config.json esta gitignored/untracked).
+    CFG["email"] = os.getenv("IQ_EMAIL") or None
+    CFG["password"] = os.getenv("IQ_PASSWORD") or None
     tg = CFG.setdefault("telegram", {})
     tg["token"] = os.getenv("TELEGRAM_TOKEN") or tg.get("token")
     tg["chat_id"] = os.getenv("TELEGRAM_CHAT_ID") or tg.get("chat_id")
     if not CFG.get("email") or not CFG.get("password"):
-        log("FALTAN CREDENCIALES: define IQ_EMAIL/IQ_PASSWORD o config.json")
+        log("FALTAN CREDENCIALES: define IQ_EMAIL/IQ_PASSWORD en .env")
         return
 
     api = IQ_Option(CFG["email"], CFG["password"])

@@ -11,15 +11,15 @@ import os
 import numpy as np
 
 L_DEFECTO = 64        # velas de contexto
-# 7 base + 2 de volumen. Los factores cross-asset (sistemico/residuo) se probaron y
-# NO mejoraron nada (ETHUSD 56.56% -> 56.23%), y en vivo exigirian bajar velas de 27
-# pares de forex por ciclo para EURUSD. Se quitan: el costo no se justifica sin
-# beneficio, y sobre todo main.py no podia alimentarlos, con lo que el modelo habria
-# recibido esas columnas EN CERO -- distinto de lo que vio entrenando, y sin error
-# visible. La guarda de n_feats detecta el numero de features, no que esten pobladas.
-N_FEATS = 9
+# 7 base + 2 de volumen + RSI + Bollinger %B. Los factores cross-asset (sistemico/residuo)
+# se probaron y NO mejoraron nada, y en vivo main.py no podia alimentarlos.
+N_FEATS = 11           # 9 base + RSI + Bollinger %B
 ATR_P = 14
 VOL_P = 20            # ventana para normalizar el volumen
+RSI_P = 14            # periodo RSI
+BB_P = 20             # periodo Bollinger Bands
+BB_K = 2.0            # desviaciones estandar de Bollinger
+_MIN_DATA = L_DEFECTO + max(ATR_P, RSI_P, BB_P) + 1
 
 
 def ventana_features(V, L=L_DEFECTO, vol=None, sis=None, res=None):
@@ -40,7 +40,7 @@ def ventana_features(V, L=L_DEFECTO, vol=None, sis=None, res=None):
     Si faltan, se rellenan con ceros para no romper la forma del vector; el modelo
     entrenado con ellos rendira peor, pero no fallara.
     """
-    if len(V) < L + ATR_P + 1:
+    if len(V) < _MIN_DATA:
         return None
     t = np.array([r[0] for r in V], np.float64)
     o = np.array([r[1] for r in V], np.float64)
@@ -93,9 +93,37 @@ def ventana_features(V, L=L_DEFECTO, vol=None, sis=None, res=None):
     sis_v = np.clip(sis_v, -10, 10)
     res_v = np.clip(res_v, -10, 10)
 
+    # --- RSI(14) rolling: cada posicion de la ventana tiene su propio RSI ---
+    cc_ext = c[i - L - RSI_P:i + 1]     # L + RSI_P + 1 cierres
+    diff_ext = np.diff(cc_ext)           # L + RSI_P retornos
+    gains = np.where(diff_ext > 0, diff_ext, 0.0)
+    losses = np.where(diff_ext < 0, -diff_ext, 0.0)
+    rsi_arr = np.zeros(L, np.float32)
+    if len(gains) >= RSI_P:
+        ag = float(gains[:RSI_P].mean())
+        al = float(losses[:RSI_P].mean())
+        for k in range(RSI_P, len(gains)):
+            ag = (ag * (RSI_P - 1) + float(gains[k])) / RSI_P
+            al = (al * (RSI_P - 1) + float(losses[k])) / RSI_P
+            pos = k - RSI_P              # 0..L-1
+            if 0 <= pos < L:
+                rs = ag / max(al, 1e-12)
+                rsi_arr[pos] = 2.0 * (1.0 - 1.0 / (1.0 + rs)) - 1.0  # -1..1
+
+    # --- Bollinger %B(20, 2) rolling: posicion dentro de las bandas ---
+    cc_bb = c[i - L - BB_P + 1:i + 1]   # L + BB_P - 1 cierres
+    bb_pct = np.zeros(L, np.float32)
+    for j in range(L):
+        chunk = cc_bb[j:j + BB_P]
+        sma = float(chunk.mean())
+        std = float(chunk.std())
+        bw = 2.0 * max(std, 1e-12)
+        bb_pct[j] = (float(cc_bb[j + BB_P - 1]) - (sma - max(std, 1e-12))) / bw
+    bb_pct = np.clip(bb_pct * 2.0 - 1.0, -1.0, 1.0)
+
     f = np.stack([ret, (cc - oo) / a, (hh - ca) / a, (cb - ll) / a, (hh - ll) / a,
                   np.sin(2 * np.pi * hora), np.cos(2 * np.pi * hora),
-                  vol_rel, vol_log], axis=1)
+                  vol_rel, vol_log, rsi_arr, bb_pct], axis=1)
     if not np.isfinite(f).all():
         return None
     return f.astype(np.float32)
@@ -366,29 +394,21 @@ def predecir_p(velas_iq, path, extras=None):
 
 # ---------------------------------------------------------------- cerrojo de instancia
 # Un unico proceso por rol (un watchdog, un bot). Dos bots operando a la vez = ordenes
-# DUPLICADAS sobre la misma senal con el stake al doble, y ninguno lo ve porque el _lock
-# de main.py no cruza procesos. El 2026-07-24 pasó: convivieron dos watchdogs y arranco
-# un segundo bot por fuera del watchdog.
-#
-# El intento anterior (cerrojo solo en el watchdog, archivo abierto en "w") fallaba por
-# DOS motivos: (1) "w" trunca el archivo a 0 bytes en cada apertura, y msvcrt.locking del
-# byte 0 sobre un archivo vacio puede tener EXITO para dos procesos a la vez (el rango
-# cae en/mas alla del EOF); (2) el bot puede lanzarse sin watchdog, y ese cerrojo no lo
-# veia. Aqui se corrige: se garantiza 1 byte real que bloquear y el cerrojo se aplica al
-# BOT ademas del watchdog. El lock es del SO: si el proceso muere (o el PC se apaga) se
-# libera solo, sin PIDs rancios que limpiar.
-_CERROJOS = []  # mantiene los descriptores abiertos mientras viva el proceso
+# DUPLICADAS sobre la misma senal con el stake al doble, invisible porque el _lock de
+# main.py no cruza procesos. El intento con open(path,"w") fallaba: "w" trunca a 0 bytes
+# y msvcrt.locking del byte 0 sobre archivo vacio tiene EXITO para dos procesos. Aqui se
+# garantiza 1 byte real de ancla y NO se trunca tras bloquear. Lock del SO: se libera solo
+# si el proceso muere o el PC se apaga.
+_CERROJOS = []
 
 def tomar_cerrojo(path):
-    """Devuelve un descriptor si se obtuvo el cerrojo exclusivo, o None si ya lo tiene
-    otro proceso vivo. En plataformas sin msvcrt/fcntl (no deberia pasar aqui) degrada a
-    'concedido' antes que bloquear el arranque."""
+    """Descriptor si se obtuvo el cerrojo exclusivo, o None si ya lo tiene otro proceso."""
     try:
         import msvcrt
-        f = open(path, "a+")            # NO trunca; crea si falta
+        f = open(path, "a+")
         f.seek(0, 2)
         if f.tell() == 0:
-            f.write("x"); f.flush()     # 1 byte REAL: el rango [0,1) existe de verdad
+            f.write("x"); f.flush()
         f.seek(0)
         try:
             msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
@@ -405,10 +425,7 @@ def tomar_cerrojo(path):
                 f.close()
                 return None
         except ImportError:
-            return open(path, "a+")     # sin primitivas de lock: no bloquear el arranque
-    # PID informativo a partir del byte 1: NO se toca el byte 0, que es el ancla del lock.
-    # Nada de truncate() aqui: dejaria el archivo en 0 bytes un instante y abriria la
-    # misma carrera que hundio al cerrojo anterior.
+            return open(path, "a+")
     try:
         f.seek(1); f.write(f" pid={os.getpid()}\n"); f.flush()
     except Exception:

@@ -88,9 +88,8 @@ def matar(p):
 def main():
     flags = sys.argv[1:]
     # Instancia unica del watchdog. El cerrojo real contra ordenes duplicadas vive en el
-    # BOT (main.py), porque un bot puede lanzarse sin watchdog; este solo evita dos
-    # supervisores relanzando cada uno su bot. Mismo helper robusto (seq_model), no la
-    # version con "w" que fallaba (truncaba el archivo y dejaba pasar dos locks).
+    # BOT (main.py); este solo evita dos supervisores. Helper robusto de seq_model, no la
+    # version con "w" que truncaba el archivo y dejaba pasar dos locks.
     from seq_model import tomar_cerrojo
     if tomar_cerrojo(LOCK) is None:
         log("Ya hay OTRO watchdog vivo (watchdog.lock tomado): no arranco.")

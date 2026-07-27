@@ -88,9 +88,13 @@ Dos rarezas conocidas del modelo actual:
 .venv314\Scripts\python.exe train_seq_save.py  # reentrena (~1 min por par)
 ```
 
-Usar **`.venv314`** (con `iqoptionapi` y `torch`). **El nombre miente: es Python
-3.10.11**, no 3.14. Forzar `PYTHONIOENCODING=utf-8` o los logs en espanol petan en
-consolas heredadas.
+Usar **`.venv314`** (con `iqoptionapi` y `torch`). Forzar `PYTHONIOENCODING=utf-8` o los
+logs en espanol petan en consolas heredadas.
+
+**Hay DOS `.venv314` y no son iguales** (ver "Git y entorno"): el del PC de trabajo es
+Python 3.14.4 con `torch` 2.13 operativo, y ahi se entrena. El del servidor **miente en
+el nombre: es Python 3.10.11**, y `torch` no carga (`c10.dll`), asi que ahi solo se
+infiere, en numpy puro, leyendo los `.npz` que exporta `exportar_npz.py`.
 
 **Arrancar siempre por `watchdog.py`, no por `main.py`.** Reinicia el bot si el proceso
 muere o si el *bucle de trading* se congela (heartbeat viejo; el hilo de Telegram sigue
@@ -151,10 +155,26 @@ pasara 27 min caido sin que nadie lo viera):
 
 ## Git y entorno
 
-- Copia de trabajo: **`D:\Proyects\IQOPT`**, que pushea a
-  `github.com/Arnaldolandin/IQOPT`. (Hasta 2026-07-21 la doc hablaba de `D:\GIT\IQOPT` y
-  `Y:\IQOPT`; **ninguna de las dos existe ya** en esta maquina.)
-- El venv vive en `D:\Proyects\IQOPT\.venv314`.
+- **Hay dos copias, y una ruta que aparenta ser una tercera no lo es.** Antes de editar,
+  mirar desde donde se esta leyendo esto:
+
+  | copia | desde el servidor | desde el PC de trabajo | que es |
+  |---|---|---|---|
+  | **produccion** | `D:\Proyects\IQOPT` | `Y:\IQOPT` | donde **corre** el bot |
+  | **trabajo** | no visible | `D:\GIT\IQOPT` | donde se desarrolla y se entrena |
+
+  `Y:` es el recurso de red `\\10.11.50.163\Proyects`, o sea que **`Y:\IQOPT` y
+  `D:\Proyects\IQOPT` son la MISMA carpeta**, no dos. De ahi que la doc se contradiga
+  segun quien la escribio: una nota anterior decia que `Y:\IQOPT` "ya no existe", lo cual
+  es cierto en el servidor (no tiene ese mapeo) y falso en el PC de trabajo.
+  **Consecuencia practica: editar `Y:\` desde el PC toca produccion en caliente**, con el
+  bot corriendo. Las dos pueden pushear a `github.com/Arnaldolandin/IQOPT`.
+- Cada copia tiene **su propio `.venv314`**, con distinto Python (ver "Como correr").
+- Lo gitignored no viaja entre copias y **diverge en silencio**: el 2026-07-24 el PC de
+  trabajo tenia un ensemble de 5 semillas por par (`seq_lstm_AIG_s1..s5`) y 29 pares en
+  `modelos_por_par`, mientras produccion ya iba con **una sola semilla sin sufijo** y 50
+  pares. Al sincronizar hay que traer `config.json` y `models/` a mano; solo con `git`
+  el codigo queda al dia apuntando a modelos que no estan.
 - Gitignored: `config.json`, **`models/*` entero** (`.pt`, `.npz`, `.pt.json`),
   `cache_ohlc_5m*/`, `heartbeat.json`, `estado_velas.json`. Los modelos se regeneran con
   `train_seq_save.py`; no viajan con `git clone`. Pendiente: rotar password IQ + token

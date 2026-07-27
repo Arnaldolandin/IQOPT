@@ -71,7 +71,7 @@ def dataset(par, L, cache="cache_ohlc_5m", fac=None):
             if k is not None:
                 sis[i] = fs[k]; res[i] = fr[k]
 
-    cola = L + S.ATR_P
+    cola = S._MIN_DATA - 1
     X, y, t = [], [], []
     for i in range(cola + 1, n - H):
         if V[i + H][0] - V[i][0] != H * 300:      # continuidad de la opcion

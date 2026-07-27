@@ -65,7 +65,8 @@ cache_ohlc_5m/
 cache_ohlc_5m_v2/
 factores_*.npz
 
-# Salidas regenerables del screening y backups locales (no viajan con el repo)
+# Salidas regenerables del screening y backups/temporales locales (no viajan con el repo)
 screening_*.json
 *.bak
 backup_reinicio_*/
+.git.corrupto_*/

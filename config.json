@@ -124,7 +124,7 @@
     "n_velas": 100,
     "reintento_max_seg": 60,
     "reintento_pausa_seg": 10,
-    "adx_max": 20
+    "adx_max": 25
   },
   "entrenamiento": {
     "pares": [

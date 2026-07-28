@@ -341,6 +341,46 @@ def atr_pct(highs, lows, closes, period):
     return atr / precio
 
 
+def adx(highs, lows, closes, period=14):
+    """ADX (Wilder) de la ultima vela: fuerza de tendencia (0-100). Bajo (~<20) = rango,
+    alto = tendencia fuerte. Devuelve None si faltan velas.
+
+    Filtro de REGIMEN: el modelo es de reversion (apuesta contra la tendencia), y la
+    reversion falla cuando hay tendencia fuerte (el precio sigue en vez de revertir).
+    Medido 2026-07-28: operar solo con ADX bajo sube el WR de 52.55% a 53.29% (roza BE).
+    """
+    n = len(closes)
+    if n < 2 * period + 1:
+        return None
+    pdm, mdm, tr = [], [], []
+    for i in range(1, n):
+        up = highs[i] - highs[i - 1]
+        dn = lows[i - 1] - lows[i]
+        pdm.append(up if (up > dn and up > 0) else 0.0)
+        mdm.append(dn if (dn > up and dn > 0) else 0.0)
+        tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+
+    def suav(x, p):                       # suavizado de Wilder: primer valor = suma inicial
+        s = [sum(x[:p])]
+        for i in range(p, len(x)):
+            s.append(s[-1] - s[-1] / p + x[i])
+        return s
+
+    atr_s, pdm_s, mdm_s = suav(tr, period), suav(pdm, period), suav(mdm, period)
+    dx = []
+    for a, pd, md in zip(atr_s, pdm_s, mdm_s):
+        a = a if a > 0 else 1e-12
+        pdi, mdi = 100 * pd / a, 100 * md / a
+        suma = pdi + mdi
+        dx.append(100 * abs(pdi - mdi) / (suma if suma > 0 else 1e-12))
+    if len(dx) < period:
+        return None
+    adx_val = sum(dx[:period]) / period   # ADX = Wilder smooth de DX
+    for x in dx[period:]:
+        adx_val = (adx_val * (period - 1) + x) / period
+    return adx_val
+
+
 def modelo_de(par):
     """Ruta del modelo que le corresponde a este par.
 
@@ -732,6 +772,20 @@ def run(api, activos, dry=False):
                                 f"(ATR {a:.4%} < min {min_atr:.4%})")
                             continue
                         info_txt = info_txt + f" | ATR {a:.4%}"
+
+                # Filtro ADX (regimen): el modelo es de REVERSION y la reversion falla en
+                # tendencia fuerte. Con adx_max>0, solo se opera cuando ADX < adx_max
+                # (mercado en rango). adx_max=0 -> desactivado. Ver adx() y la memoria
+                # optimizar-reversion. Es filtro de EJECUCION: no toca el modelo.
+                adx_max = CFG.get("operacion", {}).get("adx_max", 0)
+                if adx_max and len(closes) > 2 * 14:
+                    adx_v = adx(highs, lows, closes, 14)
+                    if adx_v is not None:
+                        if adx_v >= adx_max:
+                            log(f"  [FILTRO-ADX] {par} {lado.upper()} descartado "
+                                f"(ADX {adx_v:.1f} >= max {adx_max}, tendencia fuerte)")
+                            continue
+                        info_txt = info_txt + f" | ADX {adx_v:.1f}"
 
                 clave = f"{par}-{vela_cerrada}"
                 with _lock:

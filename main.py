@@ -258,21 +258,41 @@ def verificar_conexion(api):
     if _conectado:
         log("[RECONNECT] WebSocket caido, reconectando...")
         _conectado = False
-    for intento in range(5):
+
+    # connect() SIN timeout era el ultimo agujero de esta clase, y justo en la ruta que
+    # se activa cuando el WS ya esta muerto. El 2026-07-28 el WS cayo a las 14:56, la
+    # llamada se quedo dentro y el bot no volvio hasta que alguien lo relanzo A MANO 2h23
+    # despues: el log no tiene ni "Reconectado OK" ni "no se pudo reconectar", o sea que
+    # ni siquiera completo el primer intento. _llamar_timeout se escribio para esto y la
+    # reconexion se habia quedado fuera.
+    #
+    # 45 s por intento + backoff = 315 s en el peor caso, holgadamente por debajo de los
+    # MAX_SILENCIO=600 s del watchdog: una tanda completa de reintentos NO debe parecerle
+    # un bucle congelado. Si se suben estos numeros, subir tambien MAX_SILENCIO.
+    def _intento_connect():
+        # connect() puede REVENTAR en vez de devolver (False, motivo): stable_api hace
+        # json.loads() del motivo y con un fallo de red el motivo no es JSON. Se captura
+        # aqui dentro para no perder el texto (_llamar_timeout solo diria "fallo").
         try:
-            ok, reason = api.connect()
+            return api.connect()
+        except Exception as e:
+            return False, f"{type(e).__name__}: {str(e)[:80]}"
+
+    for intento in range(5):
+        res, exito = _llamar_timeout(_intento_connect, 45, (False, ""))
+        if not exito:
+            log(f"[RECONNECT] Intento {intento + 1} colgado (>45s), abandonado")
+        else:
+            ok, reason = res if isinstance(res, (list, tuple)) else (False, str(res))
             if ok:
-                api.change_balance(_balance_mode)
+                # tambien con timeout: si el WS vuelve a caerse a mitad, estas dos
+                # colgarian el bucle igual que colgaba connect()
+                _llamar_timeout(lambda: api.change_balance(_balance_mode), 15)
                 log(f"[RECONNECT] Reconectado OK (intento {intento + 1})")
-                try:
-                    api.get_ALL_Binary_ACTIVES_OPCODE()
-                except Exception:
-                    pass
+                _llamar_timeout(api.get_ALL_Binary_ACTIVES_OPCODE, 30)
                 _conectado = True
                 return True
             log(f"[RECONNECT] Intento {intento + 1} fallo: {reason}")
-        except Exception as e:
-            log(f"[RECONNECT] Intento {intento + 1} excepcion: {e}")
         time.sleep(3 * (intento + 1))
     log("[RECONNECT] No se pudo reconectar tras 5 intentos")
     return False

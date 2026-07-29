@@ -47,18 +47,27 @@ def cfg_entrenamiento():
     return d
 
 
-def dataset(par, L, cache="cache_ohlc_5m", fac=None):
+def dataset(par, L, cache="cache_ohlc_5m", fac=None, sin_vol=False):
     """Devuelve X (n,L,N_FEATS), y, t.
 
     'fac' = (times, sistemico, residuo) de factores.py, o None. El volumen se toma del
     propio json si esta (cache v2); si no, se rellena con ceros.
+
+    'sin_vol' fuerza las dos columnas de volumen a CERO aunque el cache las traiga. Es
+    para los activos cuyo volumen ya no llega en vivo: desde 2026-03 IQ dejo de enviarlo
+    en las ACCIONES (100% cero desde 2026-05), asi que un modelo entrenado con el volumen
+    historico real aprende pesos sobre una feature que en produccion es siempre 0 -- el
+    fallo en silencio contra el que avisa la cabecera de este archivo. Entrenando con
+    sin_vol=True el train y el vivo coinciden. NO cambia N_FEATS: el vector sigue teniendo
+    11 columnas (dos constantes a 0), asi que el chequeo n_feats de predecir_p() pasa y no
+    hay que tocar seq_model.py ni los modelos de forex.
     """
     with open(os.path.join(cache, par + ".json"), encoding="utf-8") as f:
         d = json.load(f)
     n = len(d["close"])
     V = [[d["times"][i], d["open"][i], d["high"][i], d["low"][i], d["close"][i]]
          for i in range(n)]
-    vol = d.get("volume")
+    vol = None if sin_vol else d.get("volume")
     vol = np.asarray(vol, np.float64) if vol else None
 
     sis = res = None
@@ -158,9 +167,11 @@ def entrenar_par(par, a, E, fac=None):
     H = int(E["horizonte"])
     cache = E.get("cache", "cache_ohlc_5m")
 
+    sin_vol = bool(getattr(a, "sin_volumen", False))
     print(f"[{par}] arq={a.arq} L={a.L} H={H} cache={cache} "
-          f"semillas={E.get('semillas', 1)} hp={E['hp']}", flush=True)
-    X, y, t = dataset(par, a.L, cache, fac)
+          f"semillas={E.get('semillas', 1)} hp={E['hp']}"
+          f"{' SIN VOLUMEN' if sin_vol else ''}", flush=True)
+    X, y, t = dataset(par, a.L, cache, fac, sin_vol=sin_vol)
     if len(X) == 0:
         print(f"  {par}: sin muestras, salteado")
         return
@@ -192,7 +203,8 @@ def entrenar_par(par, a, E, fac=None):
         S.guardar(net, a.arq, a.L, dst, hp=E["hp"],
                   meta={"par": par, "H": H, "val_loss": vl, "seed": seed,
                         "corte": f_(corte), "n_train": int(len(Xt)),
-                        "cache": cache, "semillas": n_sem})
+                        "cache": cache, "semillas": n_sem,
+                        "sin_volumen": sin_vol})
         if n_sem > 1 and s == 0:
             # el .json que consulta el bot cuelga del nombre base
             import shutil
@@ -220,6 +232,9 @@ def main():
     ap.add_argument("--epocas", type=int, default=int(E["epocas"]))
     ap.add_argument("--semillas", type=int, default=int(E.get("semillas", 1)))
     ap.add_argument("--salida", default="")
+    ap.add_argument("--sin-volumen", action="store_true",
+                    help="fuerza las features de volumen a 0 (activos cuyo volumen ya no "
+                         "llega en vivo: las ACCIONES desde 2026-03)")
     a = ap.parse_args()
     E["semillas"] = a.semillas
 

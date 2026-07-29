@@ -33,10 +33,18 @@ Held-out con corte temporal estricto, EURUSD, break-even 53.48%:
 error estadistico.
 
 Dos rarezas conocidas del modelo actual:
-- **Solo abre PUT.** Su `P` rara vez supera 0.54 por arriba pero si baja de 0.46, por
-  el sesgo de la tasa base del entrenamiento (49.15% de subidas).
+- ~~**Solo abre PUT.**~~ **YA NO** (comprobado 2026-07-28). Era cierto de los modelos de
+  una epoca anterior, sesgados por la tasa base del entrenamiento (49.15% de subidas). Los
+  modelos actuales abren los dos lados casi por igual: de 527 cierres del log, 267 PUT y
+  260 CALL. Ese log daba PUT 54.31% vs CALL 45.77%, 8.5 puntos, pero **eso NO es una
+  asimetria real**: medido OOS con n~50k se invierte segun el umbral (a 0.56 gana CALL
+  54.77 vs 53.89; a 0.54 gana PUT 53.78 vs 53.35). Es ruido de n pequena. No filtrar por
+  lado. Ver `reversion_condicionada_test.py`.
 - **Sin control de correlacion.** Con `max_train: 10` puede abrir varias posiciones
   sobre el mismo movimiento; en la practica son una sola apuesta con stake multiple.
+  Peor de lo que parece: como todas vencen en la MISMA marca de 15 min (ver "Mecanica de
+  la API"), varias posiciones abiertas a la vez liquidan sobre el mismo tick. Se llegaron
+  a ver 14 operaciones cerrando en el mismo minuto de reloj.
 
 ## Trampas medidas (NO repetir)
 
@@ -125,8 +133,27 @@ pasara 27 min caido sin que nadie lo viera):
   Requiere `get_ALL_Binary_ACTIVES_OPCODE()` tras conectar (puede colgar -> usar timeout).
 - Tras `connect()`: `api.change_balance("PRACTICE")` (demo) o `"REAL"`.
 - `api.check_win_v4(order_id)` **bloquea** hasta el cierre del contrato.
-- expiry<=5 -> `turbo` (~83%, break-even 54.64%); >5 -> `binary` (~87%, 53.48%).
-  **El horizonte 1 (5 min) esta descartado por esto:** el payout se come la ventaja.
+- expiry<=5 -> `turbo` (~83%, break-even 54.64%); >5 -> `binary` (~87%, 53.48%). Eso es lo
+  que se PIDE, y no determina cuanto vive la opcion (ver el punto siguiente).
+- **La opcion NO dura `expiry_min`: vence en la siguiente marca de reloj de 15 min**
+  (:00, :15, :30, :45), y el payout sigue siendo el de `binary`. Medido el 2026-07-28
+  sobre 527 cierres del log: 434 caen en minuto multiplo de 15 y 496 en los primeros 10 s
+  del minuto. Como el bot decide al cerrar cada vela de 5m, **la duracion real es 0-15 min
+  segun el minuto en que dispare**: media 8.97 min sobre 325 pares entrada-cierre
+  inequivocos, y se llego a ver una entrada a las 13:45:55 liquidando a las 13:46.
+  Solo el 1.2% de las operaciones duro los 10 min que el modelo predice. El minuto de
+  cierre de vela fija el horizonte: `mod 15 == 10` -> H=1, `== 5` -> H=2, `== 0` -> H=3.
+  `expiry_alineado()` en `main.py` existe para esto pero esta APAGADA
+  (`alinear_expiry: false`), y ademas su formula asume que IQ respeta el minimo pedido:
+  los datos dicen que no.
+  **Corolario que invalida una conclusion vieja:** aqui ponia que "el horizonte 1 (5 min)
+  esta descartado porque el payout se lo come" (turbo 83%). Es falso: pidiendo 10 min se
+  compra un `binary` que puede vivir 3 minutos y **se cobra al 87% igual** (profit +0.870
+  sobre stake 1.00 en las ganadas de 0-2.5 min). O sea que H=1 vive a break-even 53.48%,
+  no 54.64%, y era medible. Se midio el 2026-07-28 (`horizonte_corto_test.py`) y **NO
+  aporta**: AUC OOS 0.5253 a H=1 vs 0.5259 a H=2. El horizonte corto no tiene mas senal;
+  lo que mata el edge es el RETARDO de la entrada, que es otra cosa. Ver la memoria
+  `horizonte-corto-y-brusquedad-2026-07-28`.
 - `get_all_profit()` da payouts sin `update_ACTIVES_OPCODE()`. Keys OTC = `"AIG-OTC"`,
   reales = `"EURUSD-op"`.
 - **`get_all_open_time()` esta desactivado por defecto** (`usar_open_time: false`): en

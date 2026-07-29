@@ -59,6 +59,11 @@ bot.lock
 models/*.pt
 models/*.npz
 models/*.pt.json
+# Staging de reentrenamientos: se entrena AQUI y no en models/, porque el bot esta vivo
+# leyendo models/ y no debe encontrarse un archivo a medio escribir. El patron de arriba
+# no los cubre (es models/*), asi que sin estas lineas un `git add -A` subiria los pesos.
+models_nuevos/
+models_ab/
 
 # Cache de velas y factores derivados (se regeneran con download_ohlc_5m*.py)
 cache_ohlc_5m/

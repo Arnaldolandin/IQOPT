@@ -731,6 +731,34 @@ def run(api, activos, dry=False):
                     if horas_par is None or hora_utc not in horas_par:
                         continue
 
+                # ── No bajar velas de un par cuya vela actual YA se proceso.
+                # La vela de 5m solo cambia cada timeframe_seg, pero el bucle gira cada
+                # POLL segundos. Antes se bajaban las 49 ventanas en CADA pasada y el
+                # duplicado se descartaba DESPUES (con el `ultimas_velas` de mas abajo),
+                # o sea que ya se habia pagado la llamada de red.
+                #
+                # Y esa llamada es TODO el coste: medido el 2026-07-28, la mediana por par
+                # es 0.96 s, de los cuales la inferencia del modelo son 22 ms (2%) y el
+                # resto es get_candles. Una pasada completa son ~47 s.
+                #
+                # El efecto sobre el RETRASO, que es lo que importa: sin esto, si el cierre
+                # de vela caia a mitad de pasada, los ultimos pares se evaluaban hasta 94 s
+                # tarde (lo que quedaba de la pasada en curso + la siguiente entera).
+                # Saltando lo ya procesado, entre cierre y cierre el bucle gira en vacio y
+                # la pasada arranca justo en el cierre: el peor caso baja a ~47 s. Importa
+                # porque el retraso cuesta WR (inmediatas 59.68%, demoradas 51.09%).
+                #
+                # El calculo es por reloj y coincide con velas[-2]["from"]: velas[-1] es la
+                # vela en formacion, que empieza en (ahora // tf) * tf.
+                #
+                # OJO: si el activo esta CERRADO, sus velas son viejas y la guardada nunca
+                # alcanza a 'esperada', asi que se sigue bajando en cada pasada -- que es lo
+                # que hace falta para enterarse de la reapertura.
+                _tf = int(CFG["operacion"].get("timeframe_seg", 300))
+                _esperada = (int(time.time()) // _tf) * _tf - _tf
+                if ultimas_velas.get(par, 0) >= _esperada:
+                    continue
+
                 try:
                     op_ = CFG["operacion"]
                     # Las 300 velas venian de la estrategia vieja (5x EMA50 para que

@@ -46,12 +46,23 @@ def log(msg):
 
 
 def heartbeat_edad():
-    """Segundos desde el ultimo latido, o None si el archivo no existe/ilegible."""
-    try:
-        with open(HEARTBEAT, encoding="utf-8") as f:
-            return time.time() - float(json.load(f)["ts"])
-    except Exception:
-        return None
+    """Segundos desde el ultimo latido, o None si el archivo no existe/ilegible.
+
+    Reintenta UNA vez antes de rendirse. Un fallo de lectura aqui no es informativo por si
+    solo: dispara un reinicio del bot en produccion, asi que conviene estar seguro. El bot
+    ya escribe de forma atomica (os.replace), pero este reintento cubre cualquier otro
+    transitorio -- antivirus abriendo el archivo, indexador, disco ocupado -- sin cambiar
+    la semantica: si de verdad no hay latido, el segundo intento tampoco lo encuentra y se
+    reinicia igual, 200 ms mas tarde.
+    """
+    for intento in range(2):
+        try:
+            with open(HEARTBEAT, encoding="utf-8") as f:
+                return time.time() - float(json.load(f)["ts"])
+        except Exception:
+            if intento == 0:
+                time.sleep(0.2)
+    return None
 
 
 def lanzar(flags):
@@ -97,22 +108,37 @@ def main():
     log(f"Watchdog iniciado. MAX_SILENCIO={MAX_SILENCIO}s CHECK={CHECK}s GRACIA={GRACIA}s")
     proc = lanzar(flags)
     t_lanzado = time.time()
+    fallos_lectura = 0        # lecturas de heartbeat seguidas que han fallado
     while True:
         time.sleep(CHECK)
         if proc.poll() is not None:
             log(f"Bot MUERTO (exit {proc.returncode}). Relanzando...")
-            proc = lanzar(flags); t_lanzado = time.time(); continue
+            proc = lanzar(flags); t_lanzado = time.time(); fallos_lectura = 0; continue
         if time.time() - t_lanzado < GRACIA:
             continue
         edad = heartbeat_edad()
         if edad is None:
-            log("Sin heartbeat pese a la gracia -> algo va mal. Reiniciando bot...")
+            # Un archivo ilegible NO es prueba de que el bot este mal, y reiniciar por eso
+            # es tirar un bot sano. Medido el 2026-07-29: escribiendo de forma atomica y
+            # con reintento, un lector concurrente aun falla el 0.34% de las veces (en
+            # Windows el archivo puede estar bloqueado durante el reemplazo). El bot ya
+            # reiniciaba solo por esto dos veces por noche.
+            # Se exige que falle en DOS comprobaciones seguidas, separadas por CHECK
+            # segundos. Si el bot esta realmente muerto, la segunda tampoco lee nada y se
+            # reinicia 60 s mas tarde, que es irrelevante frente a MAX_SILENCIO=600.
+            fallos_lectura += 1
+            if fallos_lectura < 2:
+                log(f"Heartbeat ilegible ({fallos_lectura}/2). Puede ser una colision de "
+                    f"escritura; espero a la siguiente comprobacion.")
+                continue
+            log("Heartbeat ilegible DOS veces seguidas -> algo va mal. Reiniciando bot...")
         elif edad > MAX_SILENCIO:
             log(f"Bucle CONGELADO: heartbeat {edad:.0f}s > {MAX_SILENCIO}s. Reiniciando bot...")
         else:
+            fallos_lectura = 0        # latido leido: la racha de fallos se corta
             continue
         matar(proc)
-        proc = lanzar(flags); t_lanzado = time.time()
+        proc = lanzar(flags); t_lanzado = time.time(); fallos_lectura = 0
 
 
 if __name__ == "__main__":

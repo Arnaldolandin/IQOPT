@@ -609,12 +609,41 @@ HEARTBEAT = "heartbeat.json"
 
 def _escribir_heartbeat():
     """Escribe el timestamp del ultimo ciclo del bucle de trading. Lo lee watchdog.py.
-    Nunca debe tumbar el bot: si falla el disco, se ignora."""
+    Nunca debe tumbar el bot: si falla el disco, se ignora.
+
+    ATOMICO a proposito. Antes era open(HEARTBEAT, "w"), y "w" TRUNCA el archivo a 0 bytes
+    antes de escribir: si el watchdog leia en esa rendija encontraba un archivo vacio,
+    json.load reventaba, heartbeat_edad() devolvia None y el watchdog reiniciaba un bot
+    que estaba perfectamente vivo. Paso dos veces la noche del 2026-07-28 al 29 (01:11 y
+    05:35), con el bot operando con normalidad segun su propio log.
+
+    Se agravo al dejar de rebajar velas ya procesadas: el bucle pasa a girar en vacio
+    entre cierres, asi que el heartbeat se escribe cada ~3 s en vez de cada ~47 s, unas
+    15 veces mas de oportunidades de colisionar con la lectura del watchdog.
+
+    Es el MISMO tropiezo que ya documenta tomar_cerrojo() en seq_model.py, donde "w"
+    truncaba el .lock y dejaba pasar dos cerrojos. os.replace() es atomico en Windows
+    dentro del mismo volumen: el watchdog ve el archivo viejo o el nuevo, nunca a medias.
+    """
+    tmp = HEARTBEAT + ".tmp"
     try:
-        with open(HEARTBEAT, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": time.time()}, f)
     except Exception:
-        pass
+        return
+    # os.replace REINTENTADO, no a la primera: en Windows no se puede reemplazar un
+    # archivo que otro proceso tiene abierto, asi que si el watchdog esta leyendo justo
+    # en ese instante salta PermissionError (WinError 5). Medido: con un lector en bucle,
+    # a la primera falla. El lector solo lo tiene abierto microsegundos, asi que un par de
+    # reintentos bastan.
+    for _ in range(3):
+        try:
+            os.replace(tmp, HEARTBEAT)
+            return
+        except Exception:
+            time.sleep(0.05)
+    # Si aun asi no se pudo, da igual: el latido se escribe cada ~3 s y el watchdog
+    # tolera 600 s. Perder uno no acerca ni de lejos a un reinicio.
 
 
 def guardar_ultimas_velas(d):

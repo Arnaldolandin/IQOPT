@@ -64,6 +64,8 @@ models/*.pt.json
 # no los cubre (es models/*), asi que sin estas lineas un `git add -A` subiria los pesos.
 models_nuevos/
 models_ab/
+# Respaldo de los modelos que se retiran al activar un reentrenamiento (la vuelta atras).
+backup_modelos_*/
 
 # Cache de velas y factores derivados (se regeneran con download_ohlc_5m*.py)
 cache_ohlc_5m/

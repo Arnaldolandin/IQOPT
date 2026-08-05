@@ -124,6 +124,29 @@ def baseline(Xtr, ytr, Xte, yte, tte):
     return p
 
 
+def sgd_baseline(Xtr, ytr, Xte, yte, tte, control=False):
+    """SGDClassifier (lineal, log-loss) sobre la ventana aplanada. Es el modelo
+    mas debil del panel: si con las MISMAS features un lineal se acerca a lo que
+    da el LSTM/HGB, la complejidad secuencial no esta aportando nada."""
+    from sklearn.linear_model import SGDClassifier
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+    Xtr_f = Xtr.reshape(len(Xtr), -1)
+    Xte_f = Xte.reshape(len(Xte), -1)
+    m = make_pipeline(
+        StandardScaler(),
+        SGDClassifier(loss="log_loss", max_iter=2000, tol=1e-4, alpha=1e-4,
+                      random_state=42),
+    )
+    m.fit(Xtr_f, ytr)
+    p = m.predict_proba(Xte_f)[:, 1]
+    etq = "BASELINE SGDClassifier (lineal, ventana aplanada)"
+    if control:
+        etq += " CONTROL (etiquetas barajadas)"
+    metricas(p, yte, tte, etq)
+    return p
+
+
 def entrenar_torch(Xtr, ytr, Xva, yva, Xte, arq, epocas=60, seed=0):
     import torch
     import torch.nn as nn
@@ -197,6 +220,8 @@ def main():
     ap.add_argument("--modelo", default="ambos", choices=["lstm", "transformer", "ambos"])
     ap.add_argument("--control", action="store_true",
                     help="ademas, entrena con etiquetas barajadas para ver el suelo de ruido")
+    ap.add_argument("--sgd", action="store_true",
+                    help="ademas, mide el baseline SGDClassifier (lineal) con su control")
     a = ap.parse_args()
 
     print(f"[{PAR}] construyendo ventanas L={L} H={H}...", flush=True)
@@ -219,6 +244,12 @@ def main():
     print(f"train {len(Xtr2)} | val {len(Xva)} | test {len(Xte)}")
 
     baseline(Xtr2, ytr2, Xte, yte, tte)
+
+    if a.sgd:
+        sgd_baseline(Xtr2, ytr2, Xte, yte, tte)
+        rng = np.random.default_rng(0)
+        yb = rng.permutation(ytr2)
+        sgd_baseline(Xtr2, yb, Xte, yte, tte, control=True)
 
     arqs = ["lstm", "transformer"] if a.modelo == "ambos" else [a.modelo]
     for arq in arqs:

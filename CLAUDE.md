@@ -32,6 +32,14 @@ Held-out con corte temporal estricto, EURUSD, break-even 53.48%:
 **No hay edge establecido.** El margen a umbral 0.54 son 0.16 puntos, muy dentro del
 error estadistico.
 
+**En produccion el modelo es un BLEND LSTM+HGB, no un LSTM puro.** `predecir_seq()`
+(main.py:712) promedia `P(LSTM)` con `P(HGB)` (HistGradientBoosting sobre la misma
+ventana aplanada) si al lado del `.pt` existe el `_hgb.pkl`, ponderando por
+`hgb_peso` (`0.75` en produccion, default 0.5). Sin `.pkl` queda el LSTM solo
+(retrocompat). Los 50 pares tienen su `_hgb.pkl` (2026-08-03). Umbral activo en
+produccion: `seq_threshold: 0.54` + `umbrales_por_par` 0.54 para los 50 pares
+(`umbral_de()`, main.py:701).
+
 Dos rarezas conocidas del modelo actual:
 - ~~**Solo abre PUT.**~~ **YA NO** (comprobado 2026-07-28). Era cierto de los modelos de
   una epoca anterior, sesgados por la tasa base del entrenamiento (49.15% de subidas). Los
@@ -40,11 +48,13 @@ Dos rarezas conocidas del modelo actual:
   asimetria real**: medido OOS con n~50k se invierte segun el umbral (a 0.56 gana CALL
   54.77 vs 53.89; a 0.54 gana PUT 53.78 vs 53.35). Es ruido de n pequena. No filtrar por
   lado. Ver `reversion_condicionada_test.py`.
-- **Sin control de correlacion.** Con `max_train: 10` puede abrir varias posiciones
-  sobre el mismo movimiento; en la practica son una sola apuesta con stake multiple.
-  Peor de lo que parece: como todas vencen en la MISMA marca de 15 min (ver "Mecanica de
-  la API"), varias posiciones abiertas a la vez liquidan sobre el mismo tick. Se llegaron
-  a ver 14 operaciones cerrando en el mismo minuto de reloj.
+- **Control de correlacion por exposicion** (`max_por_divisa: 2`).
+  `correlacion_excedida()` (main.py:91) descompone cada par en exposiciones con signo
+  (+EUR/-USD) y bloquea abrir una posicion si ya hay `max_por_divisa` vivas apostando la
+  MISMA divisa (CALL +EUR y PUT -EUR no cuentan). No es total: aun pueden quedar varias
+  abiertas, y como todas vencen en la MISMA marca de 15 min (ver "Mecanica de la API")
+  liquidan sobre el mismo tick (se llegaron a ver 14 operaciones cerrando en el mismo
+  minuto de reloj). `max_por_divisa: 0` desactiva el control.
 
 ## Trampas medidas (NO repetir)
 
@@ -98,9 +108,9 @@ reescritos en cada ciclo. Son la unica fuente de verdad si el proceso muere:
   bot sano (paso 2 veces la noche del 2026-07-28 al 29). Es la senal de vida que
   lee `watchdog.py` (MAX_SILENCIO 600s -> reinicia).
 - **`operaciones_pendientes.json`** — oids de operaciones abiertas sin cierre.
-  `persistir_apertura()` (main.py:132) lo escribe tras cada `[ENTRADA]`;
-  `quitar_pendiente()` (main.py:142) lo borra tras el `[CIERRE]`. Al arrancar,
-  `recuperar_pendientes()` (main.py:181) consulta cada oid por el canal crudo
+  `persistir_apertura()` (main.py:187) lo escribe tras cada `[ENTRADA]`;
+  `quitar_pendiente()` (main.py:197) lo borra tras el `[CIERRE]`. Al arrancar,
+  `recuperar_pendientes()` (main.py:236) consulta cada oid por el canal crudo
   (`api.api.get_betinfo`, sin el reconnect interno de la libreria, que rompia el
   WS) y loguea `[CIERRE-RECUP]` si IQ lo responde; si no responde en ~12s, la
   descarta (orden vieja: el balance lo refleja). Escritura atomica con `.tmp`.
@@ -207,9 +217,14 @@ pasara 27 min caido sin que nadie lo viera):
   inequivocos, y se llego a ver una entrada a las 13:45:55 liquidando a las 13:46.
   Solo el 1.2% de las operaciones duro los 10 min que el modelo predice. El minuto de
   cierre de vela fija el horizonte: `mod 15 == 10` -> H=1, `== 5` -> H=2, `== 0` -> H=3.
-  `expiry_alineado()` en `main.py` existe para esto pero esta APAGADA
-  (`alinear_expiry: false`), y ademas su formula asume que IQ respeta el minimo pedido:
-  los datos dicen que no.
+  `expiry_alineado()` (main.py:458) filtra por esto y esta ACTIVA (`alinear_expiry: true`,
+  tolerancia 1.5 min): solo opera cuando la marca siguiente queda a `horizonte_modelo_min`
+  +/- tol (con H=2 y grilla de 15, dispara en el cierre de vela de `:05`, duracion real
+  ~10 min). La formula se corrigio el 2026-07-31 (`minutos_al_vencimiento`, main.py:400):
+  **IQ asigna la marca siguiente y punto, sin respetar el minimo pedido.** Con la formula
+  vieja, pedir 10 a las :20:05 saltaba a :30 (24.9 min reales); hoy se pide 7 para que la
+  marca de :30 absorba la latencia y la duracion real quede en ~10. Medido: mod 15 == 5
+  -> mediana 9.01 min (el unico bucket que coincide con el horizonte entrenado).
   **Corolario que invalida una conclusion vieja:** aqui ponia que "el horizonte 1 (5 min)
   esta descartado porque el payout se lo come" (turbo 83%). Es falso: pidiendo 10 min se
   compra un `binary` que puede vivir 3 minutos y **se cobra al 87% igual** (profit +0.870
@@ -220,10 +235,16 @@ pasara 27 min caido sin que nadie lo viera):
   `horizonte-corto-y-brusquedad-2026-07-28`.
 - `get_all_profit()` da payouts sin `update_ACTIVES_OPCODE()`. Keys OTC = `"AIG-OTC"`,
   reales = `"EURUSD-op"`.
-- **`get_all_open_time()` esta desactivado por defecto** (`usar_open_time: false`): en
-  esta cuenta el endpoint de digitales devuelve `None` y la libreria revienta en un
-  hilo propio (traceback que no alcanza nuestro `try/except` + 10-20s de arranque).
-  El payout NO sirve de proxy: IQ lo devuelve tambien con el activo cerrado.
+- **Disponibilidad de activos: `usar_open_time: true`, pero NO via `get_all_open_time()`**
+  (que lanza 3 hilos y 2 estan rotos en esta cuenta; el tercero era un endpoint de
+  margen retirado). `_open_time_binario()` (main.py:296) lee SOLO `get_all_init_v2()`,
+  lo unico que necesitamos (binarias). Cache con `open_time_ttl_seg: 300` (de ~1200 a
+  12 consultas/h). Medido el 2026-07-30: sin el filtro el bot pedia ordenes sobre los 49
+  activos y solo ejecutaba el 28%, y los 1.675 intentos contra activos cerrados colaban
+  la cola haciendo caducar las buenas. Si la consulta falla o devuelve 0 abiertos, el
+  filtro se desactiva PARA LA SESION (`_open_time_ciclo()`, main.py:340) y deja que IQ
+  decida en el buy. El payout NO sirve de proxy: IQ lo devuelve tambien con el activo
+  cerrado.
 - `websocket-client` DEBE ser **0.56.0**; versiones nuevas rompen `iqoptionapi`.
 
 ## Config: lo que muerde
@@ -233,11 +254,14 @@ pasara 27 min caido sin que nadie lo viera):
 - **`filtro_hora` es lista blanca en UTC.** `horas_por_par[par]` son las horas
   *permitidas*, y un par ausente queda bloqueado 24h. Activarlo con `horas_por_par`
   vacio **apaga el bot en silencio**. `timezone_offset` solo se usa en un log.
-- **`reintento_max_seg: 60`** (era 240). IQ solo acepta ordenes en ventanas de ~3-4 min
+- **`reintento_max_seg: 30`** (era 60, y antes 240). IQ solo acepta ordenes en ventanas de ~3-4 min
   que abren pasado cada cuarto de hora, y el escaneo del bot esta desalineado con ellas
-  (ver el comentario largo en `main.py`), asi que algo de reintento hace falta: 60s deja
-  que una senal de `:05` alcance la apertura de `:06`. Pero **la senal envejece mientras
-  se reintenta** y el modelo predice a 10 min DESDE la vela de decision. Medido sobre 262
+  (ver el comentario largo en `main.py`), asi que algo de reintento hace falta. Se bajo a
+  30s el 2026-08-05 (medido en el log): con `alinear_expiry` activo TODOS los fills caen a
+  0-25s del cierre de vela, y el chase de 60s no producia NI UN fill tardio -- solo
+  martilleaba IQ ~58s sobre senales que nunca aceptaba (27 SKIPs de 6 intentos en agosto).
+  Pero **la senal envejece mientras se reintenta** y el modelo predice a 10 min DESDE la
+  vela de decision. Medido sobre 262
   operaciones cerradas (2026-07-24, fuera de rollover): inmediatas 60.8% (n=158),
   demoradas por reintentos 50.0% (n=78). z=1.57 -> indicio, no prueba; el argumento de
   fondo es que un fill tardio no es la apuesta que el modelo senalo.

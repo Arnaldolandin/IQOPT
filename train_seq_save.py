@@ -19,6 +19,7 @@
 import argparse
 import json
 import os
+import pickle
 from datetime import datetime, timezone
 
 import numpy as np
@@ -80,7 +81,14 @@ def dataset(par, L, cache="cache_ohlc_5m", fac=None, sin_vol=False):
             if k is not None:
                 sis[i] = fs[k]; res[i] = fr[k]
 
-    cola = S._MIN_DATA - 1
+    # Cola de contexto que hay que pasarle a ventana_features. Se calcula A PARTIR DE L,
+    # no de S._MIN_DATA: esa constante esta fijada para L_DEFECTO=64, asi que con L>64 se
+    # pasaban MENOS filas de las que la ventana necesita, ventana_features devolvia None en
+    # todas las iteraciones y el dataset salia VACIO -- sin ningun error, solo un IndexError
+    # aguas abajo al calcular el quantil sobre un array de cero elementos. Consecuencia: era
+    # imposible entrenar con ventana mayor de 64 y no habia forma de saberlo. Detectado el
+    # 2026-07-29 al barrer L en hp_search_v2.py.
+    cola = L + max(S.ATR_P, S.RSI_P, S.BB_P)
     X, y, t = [], [], []
     for i in range(cola + 1, n - H):
         if V[i + H][0] - V[i][0] != H * 300:      # continuidad de la opcion
@@ -162,12 +170,34 @@ def entrenar_una(Xt, yt, Xv, yv, Xte, a, E, seed):
     return net, p, mejor
 
 
+def entrenar_hgb(Xt, yt, E, seed=42):
+    """HistGradientBoosting sobre la ventana aplanada (L*N_FEATS), las MISMAS features
+    que ve el LSTM. El bot promedia P(LSTM) y P(HGB): si cada uno capta una faceta
+    distinta de la ventana, el promedio gana; si HGB es ruido, no molesta. Devuelve
+    el clasificador ya ajustado. HIPERPARAMETROS en E['hgb_*']; defaults medidos en
+    eurusd_seq.py (baseline) y confirmados en eval_ensamble_hgb_seq.py."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    m = HistGradientBoostingClassifier(
+        max_iter=int(E.get("hgb_max_iter", 250)),
+        learning_rate=float(E.get("hgb_learning_rate", 0.03)),
+        max_depth=int(E.get("hgb_max_depth", 4)),
+        l2_regularization=float(E.get("hgb_l2", 2.0)),
+        min_samples_leaf=int(E.get("hgb_min_leaf", 40)),
+        random_state=int(seed))
+    m.fit(Xt.reshape(len(Xt), -1), yt)
+    return m
+
+
 def entrenar_par(par, a, E, fac=None):
     global H
-    H = int(E["horizonte"])
+    # Horizonte POR PAR si esta definido (p.ej. ETHUSD -> 3 porque su senal cae en el
+    # bucket de :00 con duracion real ~15 min); si no, el global de config.
+    H = int((E.get("horizonte_por_par") or {}).get(par, E["horizonte"]))
     cache = E.get("cache", "cache_ohlc_5m")
 
     sin_vol = bool(getattr(a, "sin_volumen", False))
+    if a.par in (E.get("sin_volumen_pares") or []):
+        sin_vol = True
     print(f"[{par}] arq={a.arq} L={a.L} H={H} cache={cache} "
           f"semillas={E.get('semillas', 1)} hp={E['hp']}"
           f"{' SIN VOLUMEN' if sin_vol else ''}", flush=True)
@@ -210,6 +240,21 @@ def entrenar_par(par, a, E, fac=None):
             import shutil
             shutil.copyfile(dst + ".json", salida + ".json")
 
+    # HGB sobre la misma ventana aplanada. Se guarda con la L y las features con que
+    # se entreno para que predecir_hgb reconstruya exactamente la misma entrada.
+    ent_hgb = bool(getattr(a, "sin_hgb", False) is False)
+    if ent_hgb:
+        print(f"  HGB aplanado entrenando...", flush=True)
+        mh = entrenar_hgb(Xt, yt, E, seed=base_seed)
+        ph = mh.predict_proba(Xte.reshape(len(Xte), -1))[:, 1]
+        dst_hgb = salida.replace(".pt", "_hgb.pkl")
+        with open(dst_hgb, "wb") as fh:
+            pickle.dump({"modelo": mh, "L": a.L,
+                         "meta": {"par": par, "H": H, "corte": f_(corte),
+                                  "n_train": int(len(Xt)), "cache": cache,
+                                  "seed": base_seed, "semillas": n_sem}}, fh)
+        print(f"  HGB valido en test: WR/EV a continuacion", flush=True)
+
     p_ens = np.mean(ps, axis=0)
     if n_sem > 1:
         for i, p in enumerate(ps, 1):
@@ -219,7 +264,11 @@ def entrenar_par(par, a, E, fac=None):
     metricas(p_ens, yte, tte,
              f"{a.arq.upper()} {par} ENSEMBLE x{n_sem}" if n_sem > 1
              else f"{a.arq.upper()} {par}")
-    print(f"\n[SAVE] {salida} ({n_sem} semilla(s))")
+    if ent_hgb:
+        metricas(0.5 * p_ens + 0.5 * ph, yte, tte,
+                 f"{a.arq.upper()}+HGB {par} (50/50)")
+    print(f"\n[SAVE] {salida} ({n_sem} semilla(s))"
+          + (f" + HGB {dst_hgb}" if ent_hgb else ""))
 
 
 def main():
@@ -230,13 +279,18 @@ def main():
     ap.add_argument("--L", type=int, default=int(E["ventana_L"]))
     ap.add_argument("--test-frac", type=float, default=float(E["test_frac"]))
     ap.add_argument("--epocas", type=int, default=int(E["epocas"]))
+    ap.add_argument("--horizonte", type=int, default=int(E["horizonte"]),
+                    help="velas a la vista: 2 = 10 min, 3 = 15 min")
     ap.add_argument("--semillas", type=int, default=int(E.get("semillas", 1)))
     ap.add_argument("--salida", default="")
     ap.add_argument("--sin-volumen", action="store_true",
                     help="fuerza las features de volumen a 0 (activos cuyo volumen ya no "
                          "llega en vivo: las ACCIONES desde 2026-03)")
+    ap.add_argument("--sin-hgb", action="store_true",
+                    help="no entrena ni guarda el HistGradientBoosting combinado")
     a = ap.parse_args()
     E["semillas"] = a.semillas
+    E["horizonte"] = a.horizonte
 
     facs = {}
     fpath = E.get("factores", "")

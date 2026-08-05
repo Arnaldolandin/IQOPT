@@ -21,13 +21,30 @@ from datetime import datetime
 from iqoptionapi.stable_api import IQ_Option
 
 GRAN = 300
-CACHE_DIR = "cache_ohlc_5m_v2"
+CACHE_DIR = "cache_ohlc_5m_v2"        # por defecto; se puede cambiar con --dir
 CANDLE_TIMEOUT = 30
 RECONNECT_CADA = 20
 
 
 def log(m):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
+
+
+def cargar_env():
+    """Credenciales desde .env, igual que main.py.
+
+    Este script leia cfg['email']/cfg['password'] de config.json, pero los secretos se
+    movieron a .env y en config.json quedaron como cadenas VACIAS (ver _cargar_env en
+    main.py y la nota del .gitignore). O sea que tal cual estaba, conectaba como usuario
+    vacio y fallaba el login."""
+    env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.isfile(env):
+        with open(env, encoding="utf-8") as f:
+            for linea in f:
+                linea = linea.strip()
+                if linea and not linea.startswith("#") and "=" in linea:
+                    k, _, v = linea.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
 
 
 def conectar(cfg):
@@ -123,12 +140,23 @@ def span_ok(p, dias):
 
 
 def main():
+    global CACHE_DIR
     ap = argparse.ArgumentParser()
     ap.add_argument("--dias", type=int, default=300)
     ap.add_argument("--pares", default="", help="coma; vacio = los de config")
+    ap.add_argument("--dir", default=CACHE_DIR,
+                    help="directorio de salida. Usar uno DISTINTO de cache_ohlc_5m_v2 "
+                         "para no pisar el cache con el que se entrenan los modelos")
     a = ap.parse_args()
+    CACHE_DIR = a.dir
 
+    cargar_env()
     cfg = json.load(open("config.json", encoding="utf-8"))
+    cfg["email"] = os.getenv("IQ_EMAIL") or cfg.get("email")
+    cfg["password"] = os.getenv("IQ_PASSWORD") or cfg.get("password")
+    if not cfg.get("email") or not cfg.get("password"):
+        log("FALTAN CREDENCIALES: define IQ_EMAIL/IQ_PASSWORD en .env")
+        return
     os.makedirs(CACHE_DIR, exist_ok=True)
     if a.pares:
         pares = [p.strip() for p in a.pares.split(",") if p.strip()]

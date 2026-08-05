@@ -820,6 +820,10 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
         #
         # OJO: la senal envejece mientras se reintenta. El modelo predice a 10 min DESDE
         # EL CIERRE DE VELA; entrar 6 min tarde es una apuesta distinta de la calculada.
+        # Reducido 60 -> 30s el 2026-08-05 (medido en el log): con 'alinear_expiry'
+        # activo TODOS los fills caen a 0-25s del cierre y el chase nunca produce un
+        # fill tardio -- solo martillea IQ ~58s sobre senales que nunca aceptara
+        # (27 SKIPs de 6 intentos en agosto). 30s cubre el 100% de los fills reales.
         op_ = CFG.get("operacion", {})
         max_seg = float(op_.get("reintento_max_seg", 240))
         pausa = float(op_.get("reintento_pausa_seg", 10))

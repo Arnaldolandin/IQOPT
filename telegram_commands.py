@@ -18,6 +18,27 @@ class TelegramCommanderSimple:
         self.ultimo_comando = 0
         self.cooldown_comandos = 2
 
+    def _llamar_con_timeout(self, fn, timeout=3.0):
+        """Ejecuta fn() en un hilo con timeout. get_balance() de iqoptionapi
+        bloquea PARA SIEMPRE si el WebSocket de IQ esta caido (while con 'pass');
+        sin esto, un /status cuelga el hilo de polling y Telegram deja de
+        responder hasta el proximo reinicio."""
+        caja = {}
+        hilo = threading.Thread(target=lambda: caja.__setitem__("r", fn()),
+                                daemon=True)
+        hilo.start()
+        hilo.join(timeout)
+        if hilo.is_alive():
+            return None
+        return caja.get("r")
+
+    def _get_balance(self):
+        """Balance en vivo de IQ, o None si el WS esta caido (sin colgarse)."""
+        try:
+            return self._llamar_con_timeout(self.api.get_balance)
+        except Exception:
+            return None
+
     def procesar_comando(self, texto):
         ahora = time.time()
         if ahora - self.ultimo_comando < self.cooldown_comandos:
@@ -87,10 +108,13 @@ class TelegramCommanderSimple:
     # ── Comandos principales ─────────────────────────────────────────────
 
     def _status(self):
-        try:
-            balance = self.api.get_balance()
-        except Exception:
-            balance = "?"
+        balance = self._get_balance()
+        ultimo = self.sesion.get("balance_inicial")
+        if balance is None:
+            if ultimo is not None:
+                balance = f"{ultimo} (arranque; WS caido)"
+            else:
+                balance = "?"
         s = self.sesion
         tr = s["trades"]
         wr = (s["wins"] / tr * 100) if tr > 0 else 0
@@ -124,11 +148,14 @@ class TelegramCommanderSimple:
         return "\n".join(lines)
 
     def _balance(self):
-        try:
-            b = self.api.get_balance()
+        b = self._get_balance()
+        if b is not None:
             return f"[BALANCE] ${b}"
-        except Exception as e:
-            return f"[ERROR] No se pudo obtener balance: {e}"
+        ultimo = self.sesion.get("balance_inicial")
+        if ultimo is not None:
+            return (f"[BALANCE] ${ultimo} (WS IQ caido; balance del arranque)\n"
+                    f"Intenta /status para ver la sesion.")
+        return "[BALANCE] No disponible (WebSocket IQ caido)"
 
     def _activas(self):
         return f"[ACTIVAS] Trades abiertos: {self.activos['abiertos']} / Max: {self.cfg.get('max_trades', 1)}"
@@ -143,10 +170,10 @@ class TelegramCommanderSimple:
 
     def _modo(self):
         modo = "REAL" if self._es_real() else "DEMO"
-        try:
-            b = self.api.get_balance()
-        except Exception:
-            b = "?"
+        b = self._get_balance()
+        if b is None:
+            ultimo = self.sesion.get("balance_inicial")
+            b = f"{ultimo} (arranque; WS caido)" if ultimo is not None else "?"
         return f"[MODO] {modo} | Balance: ${b}"
 
     def _estrategia(self):
@@ -209,8 +236,11 @@ class TelegramCommanderSimple:
         bi = self.sesion.get("balance_inicial")
         if bi is None:
             return None
+        b = self._get_balance()
+        if b is None:
+            return None
         try:
-            return float(self.api.get_balance()) - float(bi)
+            return float(b) - float(bi)
         except Exception:
             return None
 
@@ -353,7 +383,8 @@ class TelegramCommanderSimple:
 
     def _es_real(self):
         try:
-            return self.api.get_balance_mode() == "REAL"
+            r = self._llamar_con_timeout(self.api.get_balance_mode)
+            return r == "REAL"
         except Exception:
             return False
 

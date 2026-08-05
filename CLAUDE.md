@@ -87,6 +87,31 @@ Dos rarezas conocidas del modelo actual:
 - **`models/*.pt`** + **`.pt.json`** — pesos y la receta (`arq`, `L`, `hp`) para
   reconstruir la red. Gitignored: no viajan con `git clone`.
 
+### Estado en disco (dónde guarda el bot su estado)
+
+El bot persiste estado en 4 archivos del directorio raiz, todos gitignored y
+reescritos en cada ciclo. Son la unica fuente de verdad si el proceso muere:
+
+- **`heartbeat.json`** — `{"ts": <epoch>}` del ultimo ciclo del bucle de trading.
+  Escritura ATOMICA a proposito (`os.replace`): con `open(..., "w")` el watchdog
+  podia leer el archivo a 0 bytes entre el truncado y la escritura y reiniciar un
+  bot sano (paso 2 veces la noche del 2026-07-28 al 29). Es la senal de vida que
+  lee `watchdog.py` (MAX_SILENCIO 600s -> reinicia).
+- **`operaciones_pendientes.json`** — oids de operaciones abiertas sin cierre.
+  `persistir_apertura()` (main.py:132) lo escribe tras cada `[ENTRADA]`;
+  `quitar_pendiente()` (main.py:142) lo borra tras el `[CIERRE]`. Al arrancar,
+  `recuperar_pendientes()` (main.py:181) consulta cada oid por el canal crudo
+  (`api.api.get_betinfo`, sin el reconnect interno de la libreria, que rompia el
+  WS) y loguea `[CIERRE-RECUP]` si IQ lo responde; si no responde en ~12s, la
+  descarta (orden vieja: el balance lo refleja). Escritura atomica con `.tmp`.
+- **`estado_velas.json`** — ultimo id de vela ya procesado por activo. Evita que un
+  reinicio duplique operaciones sobre la misma vela (el 2026-07-22, con el
+  vigilante reiniciando cada 3-5 min, 3 senales se convirtieron en 7 posiciones y
+  EURJPY se compro 3 veces sobre la misma vela).
+- **`rsi_iq.log`** — el log completo. NO sirve de senal de vida: el hilo de
+  Telegram sigue escribiendo aunque el bucle de trading este muerto; el watchdog
+  usa `heartbeat.json`, no este archivo.
+
 ## Como correr
 
 ```powershell
@@ -107,6 +132,35 @@ infiere, en numpy puro, leyendo los `.npz` que exporta `exportar_npz.py`.
 **Arrancar siempre por `watchdog.py`, no por `main.py`.** Reinicia el bot si el proceso
 muere o si el *bucle de trading* se congela (heartbeat viejo; el hilo de Telegram sigue
 escribiendo al log aunque el bucle este muerto, asi que el log NO sirve de senal de vida).
+
+**AGUJERO CERCADO 2026-08-01: el bucle FATAL enmascaraba la congelacion.** La reconexion
+in-process de iqoptionapi esta ROTA: tras una caida del WS, `connect()` cuelga >45s en
+TODOS los intentos (medido: 8 seguidos). Antes, el bucle hacia `sleep(30); continue`
+hasta el infinito: como el heartbeat se escribe al inicio de CADA ciclo (main.py:819),
+quedaba fresco y el watchdog jamas reiniciaba -> bot caido HORAS con proceso "vivo".
+Fix (main.py, bucle de trading): si `verificar_conexion()` falla tras sus 5 intentos,
+`os._exit(3)` para que el watchdog relance un proceso limpio (un arranque conecta en
+~2s). El connect() inicial tambien lleva timeout (45s). Watchdog: backoff anti-spam, si
+el bot muere en <GRACIA segundos no relanza rapido (evita golpear IQ si esta caido y el
+arranque falla en cadena).
+
+**SEGUNDO AGUJERO 2026-08-01: el WS puede morir A MITAD de ciclo y el `for` de pares
+martillea 20s por activo.** No hace falta que el WS este caido al inicio del ciclo: el
+2026-08-01 a las 12:15 el WS cayo ~12:14:45 (se nota en que `_open_time_ciclo` expiro su
+join de 35s y se auto-desactivo). Como `_mercado_abierto` devuelve True con datos vacios,
+los 49 pares entraron a `get_candles`, y cada uno se colgaba 20s hasta el timeout ->
+~16 min dentro del `for` con el heartbeat congelado -> watchdog reinicia a los 613s.
+Peor: el hilo `ejecutar_trade` estaba colgado en `check_win_v2` (bloquea hasta el cierre;
+con WS muerto no devuelve) -> la operacion de las 12:15 quedo sin `[CIERRE]` para siempre
+(IQ si la resolvio: balance 10013.21->10012.21, -1.00).
+Fix 1 (main.py:938-947): si `get_candles` falla -> `break` (no `continue`): un solo
+timeout sale del `for`, el siguiente ciclo llama `verificar_conexion` -> `os._exit(3)`.
+Fix 2 (main.py): persistencia de operaciones en vuelo. `persistir_apertura()` guarda el
+oid en `operaciones_pendientes.json` tras cada `[ENTRADA]`; `quitar_pendiente()` lo borra
+tras el `[CIERRE]`; al arrancar, `recuperar_pendientes()` consulta cada oid pendiente por
+el canal crudo `api.api.get_betinfo` (sin el reconnect interno de la libreria) y loguea
+`[CIERRE-RECUP]` si IQ lo responde; si no responde en ~12s, lo descarta (orden vieja: el
+balance lo refleja). Asi una caida ya no destruye el resultado de una operacion en vuelo.
 
 Disponibilidad (montado el 2026-07-24, despues de que el PC se reiniciara solo y el bot
 pasara 27 min caido sin que nadie lo viera):
@@ -132,7 +186,17 @@ pasara 27 min caido sin que nadie lo viera):
 - **Comprar** -> `api.buy(monto, "EURUSD-op", "call"|"put", minutos)` -> `(status, order_id)`.
   Requiere `get_ALL_Binary_ACTIVES_OPCODE()` tras conectar (puede colgar -> usar timeout).
 - Tras `connect()`: `api.change_balance("PRACTICE")` (demo) o `"REAL"`.
-- `api.check_win_v4(order_id)` **bloquea** hasta el cierre del contrato.
+- **Resolucion de resultado -> PUSH `option-closed`, NO `check_win_v2/v4`.** `main.py`
+  usa `_esperar_cierre()` que vigila `api.api.order_async[oid]["option-closed"]`
+  (client.py lo rellena solo con la conexion viva) y devuelve profit neto
+  (`profit_amount - amount`: +0.87 / -1.00 sobre stake 1), lo que `_parse_result`
+  espera. OJO (medido 2026-08-01): `check_win_v2` -> `get_betinfo` -> `self.connect()`
+  interno (sin timeout) MATABA el WebSocket ~10-12s tras cada `[ENTRADA]` y el bot
+  entraba en bucle de muerte con el watchdog relanzandolo cada ~6 min. IQ dejo de
+  responder `api_game_betinfo`; un buy por si solo NO mata el WS (medido: 83s+ vivo
+  tras entrar), y el push llega solo en la marca de cierre. `_esperar_cierre` tiene
+  timeout 1000s (duracion real maxima 15 min); si no llega, loguea `[SIN-CIERRE]` y
+  la persistencia lo reclama al arrancar.
 - expiry<=5 -> `turbo` (~83%, break-even 54.64%); >5 -> `binary` (~87%, 53.48%). Eso es lo
   que se PIDE, y no determina cuanto vive la opcion (ver el punto siguiente).
 - **La opcion NO dura `expiry_min`: vence en la siguiente marca de reloj de 15 min**

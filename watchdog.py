@@ -113,6 +113,13 @@ def main():
         time.sleep(CHECK)
         if proc.poll() is not None:
             log(f"Bot MUERTO (exit {proc.returncode}). Relanzando...")
+            # Backoff anti-spam: si el bot muere en segundos (arranque fallido, p.ej.
+            # IQ caido y connect() revienta o hace timeout), relanzar cada CHECK
+            # segundos seria golpear IQ en bucle. Se exige que el proceso haya vivido
+            # al menos GRACIA segundos antes de relanzar rapido.
+            while time.time() - t_lanzado < GRACIA:
+                log(f"El bot duro {time.time() - t_lanzado:.0f}s < GRACIA {GRACIA}s; espero {CHECK}s...")
+                time.sleep(CHECK)
             proc = lanzar(flags); t_lanzado = time.time(); fallos_lectura = 0; continue
         if time.time() - t_lanzado < GRACIA:
             continue

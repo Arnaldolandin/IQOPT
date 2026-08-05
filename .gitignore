@@ -28,6 +28,7 @@ bt_probe.json
 # Archivos temporales / pendientes generados en runtime
 operaciones_temp.txt
 operaciones_pendientes.txt
+operaciones_pendientes.json
 
 # Base de datos SQLite (estado de runtime; se regenera con inicializar_db)
 *.db
@@ -70,10 +71,19 @@ backup_modelos_*/
 # Cache de velas y factores derivados (se regeneran con download_ohlc_5m*.py)
 cache_ohlc_5m/
 cache_ohlc_5m_v2/
+cache_bt_3m/
 factores_*.npz
+# Volcado del backtest (se regenera con backtest_estrategia_actual.py; son megas de
+# arrays, no codigo)
+bt_resultado.npz
 
 # Salidas regenerables del screening y backups/temporales locales (no viajan con el repo)
 screening_*.json
 *.bak
 backup_reinicio_*/
 .git.corrupto_*/
+
+# Respaldos de config y salidas de analisis (2026-08)
+config.json.bak-*
+bt_desplegado*.npz
+cache_ohlc_1m/

@@ -7,6 +7,7 @@
 # probabilidades con pinta razonable, pero sin ningun significado.
 import json
 import os
+import pickle
 
 import numpy as np
 
@@ -31,16 +32,36 @@ def ventana_features(V, L=L_DEFECTO, vol=None, sis=None, res=None):
 
     Extras opcionales, alineados con V (misma longitud):
       vol : volumen por vela. Aporta la conviccion detras del movimiento, que el precio
-            solo no muestra. Se normaliza contra su propia media movil.
-      sis : retorno sistemico de la familia del activo (ver factores.py).
-      res : retorno idiosincratico (residuo). ESTA es la feature clave: distingue "cayo
-            todo el mercado" (tiende a continuar) de "cayo solo este activo" (tiende a
-            revertir), que hasta ahora el modelo no podia diferenciar.
+            solo no muestra. Se normaliza contra su propia media movil. Si falta se
+            rellena con ceros: el modelo entrenado con volumen rendira peor, pero no
+            fallara. (IQ dejo de enviarlo en 18 activos desde 2026-03.)
 
-    Si faltan, se rellenan con ceros para no romper la forma del vector; el modelo
-    entrenado con ellos rendira peor, pero no fallara.
+      sis, res : SE ACEPTAN Y SE IGNORAN. No entran en el vector.
+            Vienen de factores.py (retorno sistemico de la familia e idiosincratico) y
+            la idea era distinguir "cayo todo el mercado" -- que tiende a continuar -- de
+            "cayo solo este activo" -- que tiende a revertir. Hasta el 2026-08-04 el
+            codigo los calculaba, normalizaba y recortaba... y NO los metia en el stack,
+            mientras este docstring afirmaba que res era "la feature clave". Se midio
+            antes de conectarlos: HGB sobre la ventana aplanada, mismo split 65/35 con
+            embargo, 29 pares, unico cambio 11 columnas vs 13:
+
+                AUC medio 11f 0.5026 | 13f 0.5043 | delta +0.0017 | t = +0.78
+
+            Sin señal (los deltas van de -0.026 a +0.024, dispersion 10x la media). Asi
+            que se borro el calculo muerto y se deja la firma por compatibilidad con
+            train_seq_save.py, que aun los pasa.
+
+            OJO si algun dia se conectan: hay que implementar ANTES el calculo en
+            main.py. Produccion llama predecir_p(velas, path, extras={"vol": vol}) con
+            las velas de UN par, y factores.py necesita cruzar timestamps de toda la
+            familia. Reentrenar con 13 features sin eso deja al bot alimentando ceros en
+            las dos columnas nuevas: falla EN SILENCIO.
     """
-    if len(V) < _MIN_DATA:
+    # El minimo depende de la L QUE SE PIDE, no de L_DEFECTO. Con la constante _MIN_DATA
+    # (fijada a L_DEFECTO=64) una ventana de L=32 se rechazaba siempre aunque tuviera datos
+    # de sobra, y una de L=96 pasaba la guarda sin tener suficientes filas. Para L=64 da
+    # exactamente _MIN_DATA, asi que el comportamiento de produccion no cambia.
+    if len(V) < L + max(ATR_P, RSI_P, BB_P) + 1:
         return None
     t = np.array([r[0] for r in V], np.float64)
     o = np.array([r[1] for r in V], np.float64)
@@ -84,14 +105,6 @@ def ventana_features(V, L=L_DEFECTO, vol=None, sis=None, res=None):
     else:
         vol_rel = np.zeros(L)
         vol_log = np.zeros(L)
-
-    # sistemico y residuo llegan como retornos relativos: se escalan por la volatilidad
-    # tipica del propio activo para que sean comparables con el resto del vector.
-    esc = max(float(np.std(np.diff(c[-(L + 1):]) / np.maximum(c[-(L + 1):-1], 1e-12))), 1e-9)
-    sis_v = (np.asarray(sis, np.float64)[n - L:] / esc) if (sis is not None and len(sis) == n) else np.zeros(L)
-    res_v = (np.asarray(res, np.float64)[n - L:] / esc) if (res is not None and len(res) == n) else np.zeros(L)
-    sis_v = np.clip(sis_v, -10, 10)
-    res_v = np.clip(res_v, -10, 10)
 
     # --- RSI(14) rolling: cada posicion de la ventana tiene su propio RSI ---
     cc_ext = c[i - L - RSI_P:i + 1]     # L + RSI_P + 1 cierres
@@ -390,6 +403,28 @@ def predecir_p(velas_iq, path, extras=None):
     net, _ = cargar(path)
     with torch.no_grad():
         return float(torch.sigmoid(net(torch.tensor(f).unsqueeze(0))).item())
+
+
+# ---------------------------------------------------------------- HGB combinado
+# Un HistGradientBoosting entrenado sobre la MISMA ventana aplanada (L*N_FEATS) que el
+# LSTM. Vive en un .pkl al lado del .pt (misma L, mismas features): el bot promedia
+# P(LSTM) y P(HGB). Si el .pkl falta o falla, el bot queda con el LSTM solo.
+
+
+def predecir_hgb(velas_iq, path_pkl, extras=None):
+    """P(sube) del HistGradientBoosting, con las MISMA features que el LSTM.
+
+    velas_iq = lista de dicts de get_candles (INCLUIDA la vela en formacion).
+    Devuelve P(sube) sobre la ultima vela CERRADA, o None.
+    """
+    V = velas_iq_a_filas(velas_iq)[:-1]
+    with open(path_pkl, "rb") as fh:
+        blob = pickle.load(fh)
+    L = blob.get("L", L_DEFECTO)
+    f = ventana_features(V, L, **(extras or {}))
+    if f is None:
+        return None
+    return float(blob["modelo"].predict_proba(f.reshape(1, -1))[:, 1][0])
 
 
 # ---------------------------------------------------------------- cerrojo de instancia

@@ -55,16 +55,71 @@ def hay_capacidad():
         return _trades_abiertos < max_t
 
 
-def sumar_trade():
+# ── Control de correlacion ────────────────────────────────────────────────
+# max_trades cuenta POSICIONES, no apuestas independientes, y esa diferencia se pago en
+# vivo: el 2026-08-04, sobre 98 operaciones, hubo 55 parejas simultaneas compartiendo
+# divisa y un grupo de 8 posiciones liquidando en el MISMO tick de 15 min. AUDNZD PUT +
+# EURNZD PUT + GBPNZD PUT no son tres apuestas: las tres son "el NZD sube", con el stake
+# al triple. Si falla, fallan las tres.
+#
+# Aqui cada operacion se descompone en exposicion CON SIGNO: CALL de XXXYYY es +XXX/-YYY,
+# PUT al reves. Se limita cuantas posiciones abiertas pueden compartir la MISMA exposicion
+# firmada. Apostar +NZD en un par y -NZD en otro no cuenta: son apuestas opuestas, no
+# repetidas.
+#
+# 'max_por_divisa: 0' lo desactiva (comportamiento anterior). Ante cualquier duda deja
+# pasar la orden: un fallo aqui nunca debe bloquear la operativa.
+_exposicion = {}          # oid -> {"+NZD", "-AUD"}
+
+
+def _exposicion_de(par, lado):
+    """{'+EUR','-USD'} para EURUSD CALL. Para no-forex (ETHUSD, XAUUSD) usa el par entero:
+    no tiene sentido descomponer 'ETH'/'USD' como si fueran cruces."""
+    base = par.split("-")[0]
+    if len(base) == 6 and base.isalpha() and base.isupper():
+        a, b = base[:3], base[3:]
+    else:
+        a, b = base, None
+    signo = "+" if lado.lower() == "call" else "-"
+    otro = "-" if signo == "+" else "+"
+    e = {signo + a}
+    if b:
+        e.add(otro + b)
+    return e
+
+
+def correlacion_excedida(par, lado):
+    """(True, motivo) si abrir esta orden repetiria una apuesta ya viva."""
+    try:
+        tope = int(CFG.get("operacion", {}).get("max_por_divisa", 0) or 0)
+        if tope <= 0:
+            return False, ""
+        nueva = _exposicion_de(par, lado)
+        with _lock:
+            vivas = list(_exposicion.values())
+        for d in nueva:
+            n = sum(1 for v in vivas if d in v)
+            if n >= tope:
+                return True, f"ya hay {n} posicion(es) abierta(s) apostando {d}"
+        return False, ""
+    except Exception:
+        return False, ""       # nunca bloquear por un fallo del propio control
+
+
+def sumar_trade(oid=None, par=None, lado=None):
     global _trades_abiertos
     with _lock:
         _trades_abiertos += 1
+        if oid is not None and par and lado:
+            _exposicion[oid] = _exposicion_de(par, lado)
 
 
-def restar_trade():
+def restar_trade(oid=None):
     global _trades_abiertos
     with _lock:
         _trades_abiertos -= 1
+        if oid is not None:
+            _exposicion.pop(oid, None)
 
 
 def _reset_dia_si_cambia():
@@ -102,6 +157,124 @@ def registrar_apertura():
         _riesgo["ops"].append(time.time())
 
 
+# ── Persistencia de operaciones en vuelo ──────────────────────────────────
+# Cuando un proceso muere con una orden abierta (os._exit(3), watchdog, WS caido
+# con check_win_v2 colgado), el resultado se pierde para el log aunque IQ si
+# resuelve la orden (el balance se mueve). Medido 2026-08-01: entrada ETHUSD
+# 12:15 id=14126336632, balance 10013.21->10012.21, y NINGUN [CIERRE] en el log.
+# Al entrar se persiste el oid; al arrancar se reclama su resultado.
+_PENDIENTES_FILE = "operaciones_pendientes.json"
+
+
+def _cargar_pendientes():
+    try:
+        with open(_PENDIENTES_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _guardar_pendientes(d):
+    try:
+        tmp = _PENDIENTES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, _PENDIENTES_FILE)
+    except Exception:
+        pass
+
+
+def persistir_apertura(oid, par, lado, stake, payout, vela_id):
+    with _lock:
+        d = _cargar_pendientes()
+        d[str(oid)] = {
+            "par": par, "lado": lado, "stake": stake, "payout": payout,
+            "vela_id": vela_id, "ts": time.time(),
+        }
+        _guardar_pendientes(d)
+
+
+def quitar_pendiente(oid):
+    with _lock:
+        d = _cargar_pendientes()
+        if d.pop(str(oid), None) is not None:
+            _guardar_pendientes(d)
+
+
+def _consultar_resultado_seguro(api, oid, timeout=12.0):
+    """Consulta el resultado de una orden por el canal crudo (api.api.get_betinfo),
+    SIN el bucle de reconexion de check_win_v2/get_betinfo de la libreria.
+
+    La get_betinfo() de stable_api hace `while True:` y, si IQ no responde en ~10s,
+    llama `self.connect()` INTERNAMENTE (stable_api.py:716-721) sin timeout externo.
+    Ese connect() pisaba la conexion recien creada y la dejaba rota. Medido el
+    2026-08-01: cada arranque con una orden pendiente vieja terminaba en "WebSocket
+    caido" a los ~38s y en bucle infinito de reinicios (13:21 -> 21:00 sin parar).
+
+    Devuelve ("listo", win, profit) si IQ cerro la orden, ("en_vuelo", None, None) si
+    respondio pero aun no cierra, o None si no respondio en `timeout` (orden vieja ya
+    resuelta: el balance lo refleja)."""
+    gb = api.api.game_betinfo
+    gb.isSuccessful = None
+    api.api.get_betinfo(oid)
+    t0 = time.time()
+    while gb.isSuccessful is None and time.time() - t0 < timeout:
+        time.sleep(0.2)
+    if not gb.isSuccessful:
+        return None
+    try:
+        data = gb.dict["result"]["data"][str(oid)]
+        win = data["win"]
+        if win == "" or win is None:
+            return ("en_vuelo", None, None)
+        profit = float(data["profit"]) - float(data["deposit"])
+        return ("listo", win, profit)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def recuperar_pendientes(api):
+    """Reclama el resultado de operaciones que quedaron en vuelo cuando un proceso
+    murio (os._exit(3), watchdog, check_win_v2 colgado con el WS caido). Consulta UNA
+    vez con el metodo crudo (sin el connect() interno de la libreria, que rompia la
+    conexion y entraba en bucle de reinicios). Si IQ no responde, la orden es vieja y
+    ya esta resuelta (el balance lo refleja): se descarta para no reintentarla en cada
+    arranque."""
+    with _lock:
+        d = _cargar_pendientes()
+    if not d:
+        return
+    log(f"[RECUP] {len(d)} operacion(es) pendiente(s) de un proceso anterior; "
+        "consultando resultados...")
+    for oid_s, info in list(d.items()):
+        oid = int(oid_s)
+        estado = _consultar_resultado_seguro(api, oid)
+        if estado is None:
+            log(f"[RECUP] {info.get('par')} id={oid}: IQ no responde (orden vieja ya "
+                "resuelta; el balance lo refleja). Se descarta.")
+            quitar_pendiente(oid)
+            continue
+        if estado[0] == "en_vuelo":
+            log(f"[RECUP] {info.get('par')} id={oid}: orden en vuelo, queda pendiente "
+                "para el proximo arranque")
+            continue
+        _, win, profit = estado
+        gano = win is True or str(win).lower() in ("win", "true")
+        registrar_resultado(profit)
+        with _lock:
+            _sesion["trades"] += 1
+            _sesion["pnl"] += profit
+            if gano:
+                _sesion["wins"] += 1
+            tr = _sesion["trades"]
+            wr = _sesion["wins"] / tr * 100
+            pnl = _sesion["pnl"]
+        log(f"[CIERRE-RECUP] {info.get('par')} {info.get('lado')} "
+            f"{'GANADA' if gano else 'PERDIDA'} | profit ${profit:+.2f} | "
+            f"sesion: {tr} ops, WR {wr:.1f}%, PnL ${pnl:+.2f}")
+        quitar_pendiente(oid)
+
+
 def registrar_resultado(profit):
     with _lock:
         _reset_dia_si_cambia()
@@ -117,41 +290,110 @@ def _instrumento(expiry):
 
 
 _open_time_ok = [True]
+_open_time_cache = {"t": 0.0, "datos": {}}
+
+
+def _open_time_binario(api):
+    """Disponibilidad de binary/turbo leyendo SOLO get_all_init_v2().
+
+    NO se usa api.get_all_open_time(). Medido el 2026-07-30: esa funcion lanza tres
+    hilos y dos de ellos estan rotos en esta cuenta:
+
+      __get_binary_open  -> get_all_init_v2()                  OK, es lo unico que
+                                                               necesitamos (operamos
+                                                               binarias)
+      __get_digital_open -> get_digital_underlying_list_data() devuelve None ->
+                            'TypeError: NoneType is not subscriptable' en un hilo de
+                            la libreria, fuera de nuestro try/except
+      __get_other_open   -> get_instruments(cfd/forex/crypto)  son los endpoints de
+                            MARGEN retirados; ya se comprobo que IQ responde
+                            'Invalid contract' a los 159 nombres probados
+
+    Como get_all_open_time() hace join() de los tres, los dos rotos se llevaban por
+    delante al bueno: la llamada superaba el timeout y el filtro quedaba desactivado
+    para toda la sesion (paso a las 16:59:55 del 2026-07-30). Leyendo el init de
+    binarias directamente se evitan ambos.
+
+    Devuelve el mismo formato que espera _mercado_abierto():
+        {"binary": {"EURUSD": {"open": True}, ...}, "turbo": {...}}
+    """
+    out = {"binary": {}, "turbo": {}}
+    datos = api.get_all_init_v2()
+    if not datos:
+        return {}
+    for opcion in ("binary", "turbo"):
+        bloque = datos.get(opcion)
+        if not isinstance(bloque, dict):
+            continue
+        for activo in bloque.get("actives", {}).values():
+            try:
+                nombre = str(activo["name"]).split(".")[1]
+            except (KeyError, IndexError, TypeError):
+                continue
+            # 'enabled' False = el activo no existe para esta cuenta;
+            # 'is_suspended' True = existe pero ahora no acepta ordenes.
+            abierto = bool(activo.get("enabled")) and not activo.get("is_suspended")
+            out[opcion][nombre] = {"open": abierto}
+    return out
 
 
 def _open_time_ciclo(api):
-    """get_all_open_time() con timeout y auto-desactivacion.
+    """Disponibilidad de activos con timeout, CACHE y auto-desactivacion.
 
-    La libreria lanza hilos internos para las opciones digitales; si ese endpoint
-    devuelve None, el hilo muere con TypeError FUERA de nuestro try/except y la
-    llamada puede quedarse colgada. Por eso: hilo propio con timeout y, si falla una
-    vez, se desactiva para toda la sesion y volvemos al comportamiento anterior
-    (dejar que IQ rechace en el buy). Nunca bloquear la operativa por esto.
+    Si la consulta falla o se cuelga una vez, se desactiva para toda la sesion y
+    volvemos al comportamiento anterior (dejar que IQ rechace en el buy). Nunca
+    bloquear la operativa por esto.
+
+    CACHE (2026-07-30): el bucle gira cada POLL=3 s y esta funcion se llamaba en CADA
+    vuelta. Consultar el endpoint 20 veces por minuto es absurdo -- un mercado no abre
+    y cierra en segundos -- y ademas ANADE latencia al ciclo, que es precisamente lo
+    que castiga el WR (inmediatas 59.68% vs demoradas 51.09%). Se cachea
+    'open_time_ttl_seg': con 300 s la consulta pasa de ~1200/h a 12/h y el peor caso es
+    operar 5 min contra un horario obsoleto, que el propio buy corrige rechazando.
+
+    POR QUE IMPORTA (medido el 2026-07-30 sobre 2.816 intentos del log): el bot pedia
+    ordenes sobre los 49 activos hubiera o no mercado y solo ejecutaba el 28%. Los
+    1.675 intentos contra activos cerrados no se pierden solos: cada uno gasta 5-6
+    reintentos y ~55 s de cola, y las ordenes BUENAS esperan detras hasta caducar. De
+    ahi los 361 rechazos por timing, que de 13h a 22h se comen entre el 27% y el 83%
+    de lo ejecutable.
     """
-    # Opt-in: en esta cuenta el endpoint de opciones digitales devuelve None y la
-    # libreria revienta en un hilo propio (traceback inevitable + 10-20s de arranque).
-    # Solo compensa si se operan muchos activos con horarios distintos; con un par de
-    # forex, que esta abierto 24/5, no aporta nada.
     if not CFG.get("operacion", {}).get("usar_open_time", False):
         return {}
     if not _open_time_ok[0]:
         return {}
+    ttl = float(CFG.get("operacion", {}).get("open_time_ttl_seg", 300))
+    ahora = time.time()
+    if _open_time_cache["datos"] and ahora - _open_time_cache["t"] < ttl:
+        return _open_time_cache["datos"]
     res = [None]
 
     def _c():
         try:
-            res[0] = api.get_all_open_time()
+            res[0] = _open_time_binario(api)
         except Exception:
             res[0] = None
 
     t = threading.Thread(target=_c, daemon=True)
     t.start()
-    t.join(timeout=10)
-    if t.is_alive() or not isinstance(res[0], dict):
+    t.join(timeout=35)          # get_all_init_v2 espera hasta 30 s por dentro
+    if t.is_alive() or not isinstance(res[0], dict) or not res[0]:
         _open_time_ok[0] = False
-        log("[OPEN-TIME] get_all_open_time fallo o se colgo -> desactivado por esta "
+        log("[OPEN-TIME] init de binarias fallo o se colgo -> desactivado por esta "
             "sesion; IQ decidira en el buy")
         return {}
+    inst = _instrumento(CFG.get("operacion", {}).get("expiry_min", 10))
+    n_abiertos = sum(1 for v in res[0].get(inst, {}).values() if v.get("open"))
+    # Si sale 0 el filtro bloquearia TODO. Antes que dejar el bot mudo una sesion
+    # entera, se descarta el dato y se opera como siempre.
+    if n_abiertos == 0:
+        _open_time_ok[0] = False
+        log(f"[OPEN-TIME] 0 activos abiertos en '{inst}' -> dato sospechoso, "
+            "filtro desactivado por esta sesion")
+        return {}
+    _open_time_cache["t"] = ahora
+    _open_time_cache["datos"] = res[0]
+    log(f"[OPEN-TIME] {n_abiertos} activos abiertos en '{inst}' (cache {ttl:.0f}s)")
     return res[0]
 
 
@@ -159,23 +401,61 @@ def minutos_al_vencimiento(expiry_min, grilla_min):
     """Minutos reales hasta que liquidara la opcion si se compra AHORA.
 
     Las binarias de IQ no vencen 'expiry_min' despues de la compra: vencen en marcas
-    fijas de reloj (grilla de 15 min: :00, :15, :30, :45). IQ asigna la primera marca
-    que este al menos a expiry_min de distancia. Comprando a las 20:00 con expiry 10
-    la opcion liquida 20:15 -> el horizonte REAL es 15 min, no 10.
+    fijas de reloj (grilla de 15 min: :00, :15, :30, :45). Comprando a las 20:00 con
+    expiry 10 la opcion liquida 20:15 -> el horizonte REAL es 15 min, no 10.
 
     Medido en vivo: dos entradas a las 20:00:01 y 20:05:05 liquidaron AMBAS a las
     20:15, o sea sobre el mismo tick: no eran dos operaciones sino una con doble
     stake.
+
+    'expiry_min' NO interviene en el calculo, y esto es una correccion del 2026-07-31.
+    Antes esta funcion saltaba a la marca siguiente mientras la primera estuviera a
+    menos de expiry_min ("IQ asigna la primera marca que este AL MENOS a esa
+    distancia"). Es falso: IQ asigna la marca siguiente y punto, sin respetar el
+    minimo pedido. Medido sobre 395 entradas emparejadas con su cierre, agrupadas por
+    el minuto de cierre de vela en que se decidio (mod 15), pidiendo SIEMPRE 10 min:
+
+        mod 15 == 0  -> n=108  duracion mediana 14.57 min
+        mod 15 == 5  -> n=228  duracion mediana  9.01 min   <- el horizonte entrenado
+        mod 15 == 10 -> n= 59  duracion mediana  4.80 min
+
+    Con la formula vieja, pedir 10 en el bucket de :05 daba 24.9 (la marca de :15 esta
+    a 9.9, "menos de 10", asi que saltaba a :30). La realidad son 9.01. O sea que la
+    formula erraba por 15 minutos justo en el unico bucket que sirve, y activar
+    'alinear_expiry' bloqueaba precisamente lo que habia que dejar pasar -- de ahi las
+    "9 señales sin ejecutar" que menciona expiry_alineado().
+
+    Se conserva el parametro por compatibilidad de firma; el payout SI depende de lo
+    que se pide (>5 -> binary 87%), asi que expiry_min sigue mandando en el buy.
     """
     ahora = datetime.now(timezone.utc)
     m = ahora.minute + ahora.second / 60.0
     prox = (int(m // grilla_min) + 1) * grilla_min
-    while prox - m < expiry_min:
-        prox += grilla_min
     return prox - m
 
 
-def expiry_alineado(op):
+def horizonte_modelo_min(par):
+    """Horizonte (minutos) al que el modelo del par predice.
+
+    Lee 'meta.H' (velas de 5m) del .pt.json del modelo: es la fuente de verdad, no la
+    config. Si un modelo se entrena a H=3 predice a 15 min, y comparar su senal contra
+    el horizonte_modelo_min global (10) la descartaria siempre. El global queda solo de
+    respaldo para pares sin modelo legible.
+    """
+    try:
+        path = modelo_de(par)
+        if path:
+            with open(path + ".json", encoding="utf-8") as f:
+                cfg = json.load(f)
+            h = cfg.get("meta", {}).get("H")
+            if h:
+                return float(h) * 5.0
+    except Exception:
+        pass
+    return float(CFG.get("operacion", {}).get("horizonte_modelo_min", 10))
+
+
+def expiry_alineado(op, par=None):
     """True si conviene operar AHORA: el horizonte real coincide con el ENTRENADO.
 
     Hay DOS numeros distintos y confundirlos costo 9 señales sin ejecutar:
@@ -198,16 +478,16 @@ def expiry_alineado(op):
     grilla = float(op.get("expiry_grilla_min", 15))
     tol = float(op.get("expiry_tolerancia_min", 1.5))
     pedido = float(op.get("expiry_min", 7))
-    objetivo = float(op.get("horizonte_modelo_min", 10))
+    objetivo = horizonte_modelo_min(par) if par else float(op.get("horizonte_modelo_min", 10))
     real = minutos_al_vencimiento(pedido, grilla)
     return abs(real - objetivo) <= tol, real
 
 
 def _mercado_abierto(abiertos, par, expiry):
-    """True si el activo acepta ordenes ahora, segun get_all_open_time().
+    """True si el activo acepta ordenes ahora, segun _open_time_ciclo().
 
-    Las claves de open_time son el nombre pelado ("EURUSD", "AIG-OTC"), sin el "-op"
-    de get_all_profit(). Si la consulta fallo o el activo no aparece, devolvemos True:
+    Las claves son el nombre pelado ("EURUSD", "AIG-OTC"), sin el "-op" de
+    get_all_profit(). Si la consulta fallo o el activo no aparece, devolvemos True:
     ante la duda dejamos que IQ decida en el buy (comportamiento anterior) en vez de
     bloquear operativa por un fallo de la API.
     """
@@ -433,6 +713,10 @@ def predecir_seq(velas, par=None):
     """Estrategia 'seq': modelo secuencial puro, sin primario bbrev/stoch.
     Devuelve (lado, P, info). Regla simetrica sobre P(sube).
 
+    Si al lado del .pt existe el _hgb.pkl (HistGradientBoosting sobre la MISMA ventana
+    aplanada), P final = promedio de P(LSTM) y P(HGB). El peso lo da 'hgb_peso'
+    (default 0.5). Sin .pkl, queda el LSTM solo (retrocompat).
+
     OJO: el modelo esta atado a la version de seq_model.ventana_features() con la que
     se entreno. Si se cambia esa funcion hay que reentrenar (train_seq_save.py).
     """
@@ -449,6 +733,17 @@ def predecir_seq(velas, par=None):
         # y sin ningun error visible. get_candles ya lo trae en cada vela.
         vol = [float(v.get("volume", 0) or 0) for v in velas[:-1]]
         p = seq_model.predecir_p(velas, path, extras={"vol": vol})
+        # HGB combinado: si existe el .pkl, promediar. Fallo del HGB (pkl corrupto,
+        # sklearn ausente) = queda el LSTM solo, NUNCA tumbar la operativa.
+        pkl = path.replace(".pt", "_hgb.pkl")
+        if os.path.isfile(pkl):
+            try:
+                ph = seq_model.predecir_hgb(velas, pkl, extras={"vol": vol})
+                if ph is not None:
+                    w = float(op.get("hgb_peso", 0.5))
+                    p = w * p + (1.0 - w) * ph
+            except Exception:
+                pass
     except Exception as e:
         return None, 0.0, f"(err seq: {type(e).__name__}: {str(e)[:40]})"
     if p is None:
@@ -478,6 +773,29 @@ def _parse_result(res, stake, payout):
     if win_flag is not None and (win_flag is True or str(win_flag).lower() in ("win", "true")):
         return True, stake * payout
     return False, -stake
+
+
+def _esperar_cierre(api, oid, timeout=1000.0):
+    """Espera el push 'option-closed' de IQ sin consultar get_betinfo.
+
+    Medido el 2026-08-01: IQ dejo de responder api_game_betinfo y
+    check_win_v2 -> get_betinfo -> self.connect() interno (sin timeout)
+    mataba el WebSocket ~10-12s tras cada [ENTRADA], con el bot en bucle de
+    muerte. El push 'option-closed' (client.py) llega solo mientras la
+    conexion esta viva: un buy NO la mata (medido: WS vivo 83s+ tras entrar).
+    Devuelve profit neto (profit_amount - amount) o None si el push no llega
+    en `timeout` segundos (duracion real maxima de una opcion: 15 min)."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            ao = api.api.order_async.get(oid)
+            if ao and "option-closed" in ao:
+                msg = ao["option-closed"]["msg"]
+                return float(msg["profit_amount"]) - float(msg["amount"])
+        except Exception:
+            pass
+        time.sleep(2.0)
+    return None
 
 
 def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
@@ -522,12 +840,19 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
                     break
                 time.sleep(pausa)
                 continue
+            # Correlacion: se comprueba AQUI, junto al buy, no al lanzar el hilo. Durante
+            # la espera del reintento pueden haberse abierto otras posiciones sobre la
+            # misma divisa, y lo que importa es la foto del momento de comprar.
+            corr, por_que = correlacion_excedida(par, lado)
+            if corr:
+                motivo = f"correlacion: {por_que}"
+                break
             try:
                 ok, oid = api.buy(stake, f"{par}-op", lado, expiry)
             except Exception as e:
                 ok, oid = False, f"excepcion: {str(e)[:60]}"
             if ok:
-                sumar_trade()
+                sumar_trade(oid, par, lado)
                 cupo = True
                 registrar_apertura()
                 with _lock:
@@ -557,8 +882,23 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
                 f"{time.time()-t_ini:.0f}s")
         log(f"[ENTRADA] {par} {lado.upper()} | payout {payout:.0%} | id={oid} | "
             f"exp {expiry}m | {info_txt}")
+        # Persistir la operacion: si este proceso muere antes del cierre (os._exit(3),
+        # watchdog, WS caido), el proximo arranque reclama su resultado con
+        # recuperar_pendientes() en vez de perder el [CIERRE] para siempre.
+        persistir_apertura(oid, par, lado, stake, payout, vela_id)
 
-        res = api.check_win_v4(oid)
+        # Resolucion del resultado por PUSH 'option-closed', NO por check_win_v2.
+        # Medido 2026-08-01: check_win_v2 -> get_betinfo -> self.connect() interno
+        # (sin timeout) mataba el WS ~10-12s tras cada ENTRADA (hoy IQ no responde
+        # api_game_betinfo), entrando el bot en bucle de muerte con el watchdog
+        # relanzandolo cada ~6 min. El push llega solo y no toca la conexion.
+        # 'option-closed' viene de client.py; check_win_v3 ya lo usaba, pero en
+        # while True sin timeout: aqui con timeout (max duracion real 15 min).
+        res = _esperar_cierre(api, oid)
+        if res is None:
+            log(f"[SIN-CIERRE] {par} {lado.upper()} id={oid}: no llego el push "
+                f"option-closed; la persistencia lo reclamara en el proximo arranque")
+            return
         gano, profit = _parse_result(res, stake, payout)
 
         registrar_resultado(profit)
@@ -573,13 +913,16 @@ def ejecutar_trade(api, par, lado, payout, stake, expiry, vela_id, info_txt=""):
 
         log(f"[CIERRE] {par} {lado.upper()} {'GANADA' if gano else 'PERDIDA'} | "
             f"profit ${profit:+.2f} | sesion: {tr} ops, WR {wr:.1f}%, PnL ${pnl:+.2f}")
+        quitar_pendiente(oid)
     except Exception as e:
         log(f"[ERROR] {par}: {type(e).__name__}: {str(e)[:60]}")
     finally:
         # solo se devuelve el cupo si de verdad se tomo: los hilos que se rindieron
-        # esperando nunca lo ocuparon, y restarlo aqui dejaria el contador en negativo
+        # esperando nunca lo ocuparon, y restarlo aqui dejaria el contador en negativo.
+        # 'oid' puede no existir si se salio antes del buy: sin el, la exposicion de esta
+        # orden quedaria colgada para siempre y bloquearia su divisa.
         if cupo:
-            restar_trade()
+            restar_trade(locals().get("oid"))
         with _lock:
             _activos_ref["abiertos"] = _trades_abiertos
 
@@ -718,9 +1061,16 @@ def run(api, activos, dry=False):
                 _ultima_limpieza = ahora
 
             if not verificar_conexion(api):
-                log("[FATAL] Sin conexion, durmiendo 30s...")
-                time.sleep(30)
-                continue
+                # Reconexion in-process ROTA en iqoptionapi: tras una caida del WS,
+                # connect() cuelga >45s en todos los intentos (medido 2026-08-01:
+                # 8 intentos seguidos, todos colgados). Quedarse aqui en bucle no
+                # arregla nada y, peor, el heartbeat se escribe al inicio de cada
+                # ciclo asi que el watchdog NUNCA ve la congelacion: el bot queda
+                # caido horas con proceso "vivo". Un proceso NUEVO conecta en ~2s.
+                # Salir para que el watchdog lo relance limpio.
+                log("[FATAL] Sin conexion tras 5 intentos. Saliendo para que el "
+                    "watchdog relance un proceso limpio...")
+                os._exit(3)
 
             # Una sola consulta de payouts por ciclo (evita 231 llamadas/ciclo).
             # CON timeout: si el WS murio esta llamada colgaria el bucle (ver
@@ -799,13 +1149,17 @@ def run(api, activos, dry=False):
                     minimo = _sm.L_DEFECTO + _sm.ATR_P + 2
                     n_velas = max(int(op_.get("n_velas", 100)), minimo)
                     # CON timeout: get_candles es la llamada que colgó el bot el
-                    # 2026-07-24 cuando el WS murio. Si se cuelga o falla -> exito=False
-                    # -> saltamos este par; verificar_conexion detectara la caida y
-                    # reconectara en el proximo ciclo.
+                    # 2026-07-24 cuando el WS murio. Si se cuelga o falla -> exito=False.
+                    # NO continuar al siguiente par: si el WS murio, los otros 48 se
+                    # colgaran igual y cada uno paga sus 20s de timeout -> 16 min dentro
+                    # del for con el heartbeat congelado, y el watchdog no ve la caida
+                    # (solo hay que salir para que verificar_conexion actue al inicio
+                    # del proximo ciclo; medido el 2026-08-01: WS cayo ~12:14:45 y el
+                    # bot recien murio a las 12:25:30 martillando get_candles).
                     velas, exito = _llamar_timeout(
                         lambda: api.get_candles(par, op_["timeframe_seg"], n_velas, time.time()), 20)
                     if not exito:
-                        continue
+                        break
                 except Exception:
                     continue
                 if not velas or len(velas) < minimo:
@@ -870,12 +1224,13 @@ def run(api, activos, dry=False):
                         continue
 
                 # Alinear el horizonte real con el que se entreno (ver expiry_alineado).
-                ok_exp, mins = expiry_alineado(CFG["operacion"])
+                ok_exp, mins = expiry_alineado(CFG["operacion"], par)
                 if not ok_exp:
-                    # 'expiry' es lo que se le PIDE a IQ (7); el modelo predice a
-                    # horizonte_modelo_min (10). Mostrar el primero hacia parecer que
-                    # el filtro comparaba contra el numero equivocado.
-                    _obj = CFG["operacion"].get("horizonte_modelo_min", 10)
+                    # 'mins' es la duracion REAL (distancia a la proxima marca de 15);
+                    # 'expiry' es lo que se le PIDE a IQ y solo fija el payout. Loguear
+                    # el segundo hacia parecer que el filtro comparaba contra el numero
+                    # equivocado.
+                    _obj = horizonte_modelo_min(par)
                     log(f"  [EXPIRY] {par} {lado.upper()} descartado: duracion real "
                         f"{mins:.1f} min, el modelo predice a {_obj} min")
                     continue
@@ -958,12 +1313,16 @@ def main():
     # red el motivo es el string 'Websocket connection closed.' -> JSONDecodeError.
     # Sin este try la traza se va por stderr y rsi_iq.log se queda en la linea de
     # arriba: el 2026-07-22 hubo nueve arranques que no dejaron ni una pista del motivo.
-    try:
-        ok, reason = api.connect()
-    except Exception as e:
-        ok, reason = False, f"{type(e).__name__}: {str(e)[:120]}"
-        if isinstance(e, json.JSONDecodeError):
-            reason += " (login KO; el motivo real no era JSON, mirar red/IQ caido)"
+    # connect() CON timeout: si IQ esta caido al arrancar, la llamada se colgaria sin
+    # esto y el proceso quedaria vivo colgado (mismo agujero que la reconexion). Con
+    # timeout, falla y 'return' termina el proceso -> el watchdog lo reintenta.
+    # _llamar_timeout traga la excepcion del login KO (JSONDecodeError de stable_api
+    # cuando el motivo no es JSON); exito=False cubre timeout y reviente.
+    res, _exito = _llamar_timeout(api.connect, 45, (False, ""))
+    if not _exito:
+        ok, reason = False, "timeout o fallo de red (connect no devolvio)"
+    else:
+        ok, reason = res if isinstance(res, (list, tuple)) else (False, str(res))
     if not ok:
         log(f"NO CONECTO: {reason}")
         return
@@ -991,6 +1350,13 @@ def main():
         log("Opcode actualizado.")
     else:
         log("Opcode timeout, usando lista estatica.")
+
+    # Reclamar operaciones pendientes de un proceso anterior. En hilo daemon: si hay
+    # varias y cada una tarda hasta 60s de timeout, el arranque no debe esperar (el
+    # watchdog mediria un arranque lento). El resultado llega como [CIERRE-RECUP].
+    # Medido 2026-08-01: entrada ETHUSD 12:15 sin [CIERRE], balance -1.00 en IQ.
+    if not args.dry:
+        threading.Thread(target=recuperar_pendientes, args=(api,), daemon=True).start()
 
     if args.real:
         log("MODO REAL - dinero real")

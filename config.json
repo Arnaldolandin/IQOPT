@@ -5,7 +5,7 @@
   "timeframe_seg": 300,
   "expiry_min": 10,
   "stake": 1.0,
-   "min_payout": 0.87,
+  "min_payout": 0.84,
   "estrategia": "seq",
   "modelos_por_par": {
    "AIG": "models/seq_lstm_AIG.pt",
@@ -123,11 +123,10 @@
   "min_atr": 0.0,
   "horizonte_modelo_min": 10,
   "n_velas": 100,
-  "reintento_max_seg": 30,
+  "reintento_max_seg": 60,
   "reintento_pausa_seg": 10,
   "adx_max": 0,
-  "hgb_peso": 0.75,
-  "max_por_divisa": 2
+  "hgb_peso": 0.75
  },
  "entrenamiento": {
   "pares": [
@@ -503,9 +502,6 @@
     17,
     18,
     19,
-    20,
-    21,
-    22,
     23
    ],
    "EURAUD": [
@@ -1072,9 +1068,38 @@
    ]
   }
  },
-  "pares_binarios": [
-   "EURUSD"
-  ],
+ "pares_binarios": [
+  "EURUSD",
+  "SpaceX",
+  "NZDUSD",
+  "EURGBP",
+  "EURJPY",
+  "GBPUSD",
+  "AUDCAD",
+  "XAUUSD",
+  "GBPCHF",
+  "USDJPY",
+  "EURCHF",
+  "AUDJPY",
+  "GBPJPY",
+  "AUDUSD",
+  "AUDCHF",
+  "EURNZD",
+  "GBPCAD",
+  "NZDCAD",
+  "EURAUD",
+  "USDCAD",
+  "GBPAUD",
+  "ETHUSD",
+  "AUDNZD",
+  "CADCHF",
+  "USOUSD",
+  "EURCAD",
+  "CHFJPY",
+  "NZDJPY",
+  "GBPNZD",
+  "XRPUSD"
+ ],
  "telegram": {
   "habilitado": true,
   "token": "",
